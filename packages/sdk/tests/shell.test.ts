@@ -1,0 +1,168 @@
+import type { AddressInfo } from "node:net";
+import { afterEach, describe, expect, it } from "vitest";
+import { WebSocketServer } from "ws";
+import { execOverShell, microvmSubprotocols } from "../src/shell.js";
+
+/** Fake PTY end: extracts the nonce from the marker in the payload and answers. */
+function fakeShellServer(script: (nonce: string) => string) {
+  const wss = new WebSocketServer({ port: 0 });
+  wss.on("connection", (ws) => {
+    ws.on("message", (data: Buffer) => {
+      const text = data.toString();
+      const m = /__SUNABA_DONE_([a-z0-9]+)_%d__/.exec(text);
+      if (m) ws.send(script(m[1] ?? ""));
+    });
+  });
+  return wss;
+}
+
+function port(wss: WebSocketServer): number {
+  return (wss.address() as AddressInfo).port;
+}
+
+describe("microvmSubprotocols", () => {
+  it("emits the documented subprotocol trio", () => {
+    expect(microvmSubprotocols("TOK", 9000)).toEqual([
+      "lambda-microvms",
+      "lambda-microvms.authentication.TOK",
+      "lambda-microvms.port.9000",
+    ]);
+  });
+});
+
+describe("execOverShell", () => {
+  let wss: WebSocketServer | undefined;
+  afterEach(() => wss?.close());
+
+  it("returns command output and exit code", async () => {
+    wss = fakeShellServer((n) => `hello-output\nline two\n__SUNABA_DONE_${n}_0__\n`);
+    const p = port(wss);
+    const res = await execOverShell({
+      endpoint: `127.0.0.1:${p}`,
+      url: `ws://127.0.0.1:${p}`,
+      token: "tok",
+      command: "echo hi",
+      timeoutMs: 5_000,
+    });
+    expect(res.exitCode).toBe(0);
+    expect(res.output).toContain("hello-output");
+    expect(res.output).toContain("line two");
+    expect(res.output).not.toContain("__SUNABA_DONE_");
+  });
+
+  it("propagates a non-zero exit code", async () => {
+    wss = fakeShellServer((n) => `boom\n__SUNABA_DONE_${n}_42__\n`);
+    const p = port(wss);
+    const res = await execOverShell({
+      endpoint: `127.0.0.1:${p}`,
+      url: `ws://127.0.0.1:${p}`,
+      token: "tok",
+      command: "exit 42",
+      timeoutMs: 5_000,
+    });
+    expect(res.exitCode).toBe(42);
+    expect(res.output).toContain("boom");
+  });
+
+  it("strips echoed input, CR noise and ANSI escapes", async () => {
+    const E = String.fromCharCode(0x1b);
+    wss = fakeShellServer(
+      (n) =>
+        `${E}[32msh#${E}[0m eval "$(printf %s 'abcdef'\r\nreal-output\r\n__SUNABA_DONE_${n}_0__\r\n`,
+    );
+    const p = port(wss);
+    const res = await execOverShell({
+      endpoint: `127.0.0.1:${p}`,
+      url: `ws://127.0.0.1:${p}`,
+      token: "tok",
+      command: "true",
+      timeoutMs: 5_000,
+    });
+    expect(res.output).toBe("real-output");
+  });
+
+  it("keeps every typed input line short (canonical-mode safe)", async () => {
+    const sent: string[] = [];
+    wss = new WebSocketServer({ port: 0 });
+    wss.on("connection", (ws) => {
+      ws.on("message", (data: Buffer) => {
+        sent.push(data.toString());
+        const m = /__SUNABA_DONE_([a-z0-9]+)_%d__/.exec(sent.join(""));
+        if (m) ws.send(`__SUNABA_DONE_${m[1]}_0__\n`);
+      });
+    });
+    const p = port(wss);
+    await execOverShell({
+      endpoint: `127.0.0.1:${p}`,
+      url: `ws://127.0.0.1:${p}`,
+      token: "tok",
+      // ~6 KB of command → base64 payload far above the ~4 KB line limit.
+      command: `echo ${"x".repeat(6_000)}`,
+      timeoutMs: 5_000,
+    });
+    const lines = sent.join("").split("\n").filter(Boolean);
+    for (const line of lines) {
+      expect(line.length).toBeLessThanOrEqual(2_048);
+      if (line.includes("printf %s")) {
+        // First wrapped line: prefix + one 76-char b64 chunk.
+        expect(line.length).toBeLessThan(140);
+      }
+    }
+  });
+
+  it("drops echoed PS2 continuation prompts from output", async () => {
+    const b64chunk = "A".repeat(72); // realistic wrapped base64 echo
+    wss = fakeShellServer(
+      (n) => `> eval "$(printf %s 'abc'\n> ${b64chunk}\nreal\n__SUNABA_DONE_${n}_0__\n`,
+    );
+    const p = port(wss);
+    const res = await execOverShell({
+      endpoint: `127.0.0.1:${p}`,
+      url: `ws://127.0.0.1:${p}`,
+      token: "tok",
+      command: "true",
+      timeoutMs: 5_000,
+    });
+    expect(res.output).toBe("real");
+  });
+
+  it("drops bare base64 continuation lines of an echoed payload (PS2='')", async () => {
+    const b64chunk = "A".repeat(72);
+    wss = fakeShellServer(
+      (n) =>
+        `eval "$(printf %s 'abc'\n${b64chunk}\n${b64chunk}' | base64 -d)"; printf '__SUNABA_DONE_${n}_%d__\\n' $?\n` +
+        `real\n${b64chunk}\n__SUNABA_DONE_${n}_0__\n`,
+    );
+    const p = port(wss);
+    const res = await execOverShell({
+      endpoint: `127.0.0.1:${p}`,
+      url: `ws://127.0.0.1:${p}`,
+      token: "tok",
+      command: "true",
+      timeoutMs: 5_000,
+    });
+    // Payload chunks are stripped; a genuine bare-base64 output line after
+    // the echo's closing fragment is kept.
+    expect(res.output).toBe(`real\n${b64chunk}`);
+  });
+
+  it("rejects with ShellClosed when the socket dies mid-command", async () => {
+    wss = fakeShellServer(() => {
+      // Server closes without answering.
+      return "";
+    });
+    wss.on("connection", (ws) => {
+      ws.on("message", () => ws.close());
+    });
+    const p = port(wss);
+    await expect(
+      execOverShell({
+        endpoint: `127.0.0.1:${p}`,
+        url: `ws://127.0.0.1:${p}`,
+        token: "tok",
+        command: "sleep 60",
+        timeoutMs: 5_000,
+      }),
+    ).rejects.toThrow(/closed/i);
+  });
+});

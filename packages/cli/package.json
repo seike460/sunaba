@@ -1,0 +1,51 @@
+{
+  "name": "sunaba-cli",
+  "version": "0.1.0",
+  "description": "CLI for AWS Lambda MicroVMs - build images, run sandboxes, exec commands",
+  "type": "module",
+  "bin": {
+    "sunaba": "./dist/main.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cloudwatch-logs": "^3.1141.0",
+    "sunaba-sdk": "^0.1.0",
+    "@aws-sdk/client-lambda-microvms": "^3.1141.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seike460/sunaba.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/seike460/sunaba#readme",
+  "bugs": "https://github.com/seike460/sunaba/issues",
+  "keywords": [
+    "aws",
+    "lambda",
+    "microvms",
+    "cli",
+    "sandbox",
+    "tooling"
+  ]
+}

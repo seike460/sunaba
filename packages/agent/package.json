@@ -1,0 +1,46 @@
+{
+  "name": "sunaba-agent",
+  "version": "0.1.0",
+  "description": "Optional in-guest agent for AWS Lambda MicroVMs - exec and filesystem API plus lifecycle hooks",
+  "type": "module",
+  "bin": {
+    "sunaba-agentd": "./dist/agentd.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seike460/sunaba.git",
+    "directory": "packages/agent"
+  },
+  "homepage": "https://github.com/seike460/sunaba#readme",
+  "bugs": "https://github.com/seike460/sunaba/issues",
+  "keywords": [
+    "aws",
+    "lambda",
+    "microvms",
+    "agent",
+    "guest",
+    "sandbox"
+  ]
+}
