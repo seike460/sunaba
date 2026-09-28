@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveRegion } from "../src/transport.js";
 import { FakeMicrovmsClient } from "./helpers.js";
 
@@ -25,6 +25,12 @@ vi.mock("@aws-sdk/client-lambda-microvms", async (importOriginal) => {
 });
 
 describe("resolveRegion", () => {
+  // The env step runs before the default chain — a developer's exported
+  // AWS_REGION would otherwise shadow every fallback case below.
+  beforeEach(() => {
+    vi.stubEnv("AWS_REGION", "");
+    vi.stubEnv("AWS_DEFAULT_REGION", "");
+  });
   afterEach(() => {
     ambient.region = undefined;
     ambient.error = undefined;
