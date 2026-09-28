@@ -58,8 +58,12 @@ describe("startHooksServer", () => {
   it("does not dispatch prototype properties like 'constructor'", async () => {
     server = startHooksServer({}, { port: 0, host: "127.0.0.1" });
     const port = await listening(server);
-    const res = await post(port, "/aws/lambda-microvms/runtime/v1/constructor");
-    expect(res.status).toBe(200); // acknowledged, never invoked
+    // Invoked without the own-property guard, valueOf/hasOwnProperty throw
+    // (no `this`) and __proto__ is not callable — each would answer 503.
+    for (const name of ["__proto__", "hasOwnProperty", "valueOf", "constructor"]) {
+      const res = await post(port, `/aws/lambda-microvms/runtime/v1/${name}`);
+      expect(res.status, name).toBe(200); // acknowledged, never invoked
+    }
   });
 
   it("returns 503 when a handler throws and reports the error", async () => {
