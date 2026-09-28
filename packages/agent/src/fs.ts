@@ -191,13 +191,17 @@ export const fsRoutes = {
       await fsp.mkdir(path.dirname(to), { recursive: true });
       // Open WITHOUT O_TRUNC first: a same-inode dst (same path/hardlink)
       // must be rejected before truncating the source's data.
-      const dst = await fsp.open(to, WRITE_FLAGS & ~constants.O_TRUNC);
+      const mode = ss.mode & 0o7777;
+      const dst = await fsp.open(to, WRITE_FLAGS & ~constants.O_TRUNC, mode);
       try {
         const ds = await dst.stat();
         if (!ds.isFile()) throw new HttpError(400, "destination is not a regular file");
         if (ss.dev === ds.dev && ss.ino === ds.ino) {
           throw new HttpError(400, "source and destination are the same file");
         }
+        // Match the directory path (fsp.cp): dst takes the source's mode, set
+        // before any data lands in a dst that may be more permissive.
+        await dst.chmod(mode);
         await dst.truncate(0);
         // writeFile accepts a stream and loops short writes internally —
         // manual `fh.write(chunk)` could silently truncate.

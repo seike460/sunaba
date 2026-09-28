@@ -1,4 +1,12 @@
-import { linkSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  linkSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -223,6 +231,23 @@ describe("fs API", () => {
     expect((await post(apiPort, "/fs/copy", { from: f, to: link })).status).toBe(400);
     expect(readFileSync(f, "utf8")).toBe("precious data");
     expect(readFileSync(link, "utf8")).toBe("precious data");
+  });
+
+  it("copy gives a new or existing destination file the source's mode", async () => {
+    const src = path.join(dir, "run.sh");
+    writeFileSync(src, "#!/bin/sh\n");
+    // Group-writable: a umask of 022 would clear the bit on a plain create.
+    chmodSync(src, 0o775);
+    const fresh = path.join(dir, "copied", "run.sh");
+    expect((await post(apiPort, "/fs/copy", { from: src, to: fresh })).status).toBe(200);
+    expect(statSync(fresh).mode & 0o7777).toBe(0o775);
+
+    const existing = path.join(dir, "existing.sh");
+    writeFileSync(existing, "old");
+    chmodSync(existing, 0o644);
+    expect((await post(apiPort, "/fs/copy", { from: src, to: existing })).status).toBe(200);
+    expect(statSync(existing).mode & 0o7777).toBe(0o775);
+    expect(readFileSync(existing, "utf8")).toBe("#!/bin/sh\n");
   });
 
   it("404s on missing files and 400s on missing args", async () => {
