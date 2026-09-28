@@ -14,6 +14,8 @@ import { Match, Template } from "aws-cdk-lib/assertions";
 import { afterEach, describe, expect, it } from "vitest";
 import { MicrovmImage, MicrovmImageSources, MicrovmNetworkConnector } from "../src/index.js";
 
+type ImageProps = ConstructorParameters<typeof MicrovmImage>[2];
+
 const tmpDirs: string[] = [];
 function tmp(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -24,13 +26,13 @@ afterEach(() => {
   for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-function stackWithImage(props?: Partial<Parameters<typeof MicrovmImage>[2]>) {
+function stackWithImage(props?: Partial<ImageProps>) {
   const app = new App();
   const stack = new Stack(app, "TestStack");
   const image = new MicrovmImage(stack, "Image", {
     source: MicrovmImageSources.fromS3Uri("s3://artifacts-bucket/app.zip"),
     ...props,
-  } as Parameters<typeof MicrovmImage>[2]);
+  } as ImageProps);
   return { stack, image, template: Template.fromStack(stack) };
 }
 
@@ -175,7 +177,7 @@ describe("MicrovmImage", () => {
   // Staging a directory asset copies it to <outdir>/asset.<hash>/ — synth for
   // real and walk the staged files so exclusion is verified end to end,
   // including nested paths.
-  function synthAssetEntries(source: Parameters<typeof MicrovmImage>[2]["source"]) {
+  function synthAssetEntries(source: ImageProps["source"]) {
     const outdir = tmp("sunaba-out-");
     const app = new App({ outdir });
     const stack = new Stack(app, "TestStack");

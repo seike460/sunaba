@@ -66,7 +66,7 @@ class FakeClient {
       (x) =>
         x.cmd === name && (!x.input || Object.entries(x.input).every(([k, v]) => input[k] === v)),
     );
-    if (f !== -1) throw this.failures.splice(f, 1)[0].err;
+    if (f !== -1) throw this.failures.splice(f, 1)[0]?.err;
     switch (name) {
       case "ListMicrovmImagesCommand":
         return { items: [{ name: "demo", imageArn: ARN }] };
@@ -232,7 +232,8 @@ describe("init", () => {
     const { client, context, lines } = ctx([], { cwd: dir });
     await cmdRun(parseArgs(["--image", "demo", "--json"]), context);
     const run = client.callsOf("RunMicrovmCommand")[0];
-    expect(run.input.executionRoleArn).toBeUndefined();
+    expect(run).toBeDefined();
+    expect(run?.input.executionRoleArn).toBeUndefined();
     expect(
       JSON.parse(lines.find((l) => l.startsWith("{")) ?? "{}").executionRoleArn,
     ).toBeUndefined();
@@ -271,8 +272,8 @@ describe("build", () => {
     );
     expect(code).toBe(0);
     const create = client.callsOf("CreateMicrovmImageCommand")[0];
-    expect(create.input.name).toBe("demo");
-    expect(create.input.buildRoleArn).toBe("arn:aws:iam::123456789012:role/build");
+    expect(create?.input.name).toBe("demo");
+    expect(create?.input.buildRoleArn).toBe("arn:aws:iam::123456789012:role/build");
     expect(lines[0]).toContain(`built ${ARN}`);
   });
 
@@ -323,7 +324,9 @@ describe("build", () => {
       expect(code).toBe(0);
       // Managed-name expansion proves the mocked default client's region.
       const create = client.callsOf("CreateMicrovmImageCommand")[0];
-      expect(create.input.baseImageArn).toBe("arn:aws:lambda:us-west-2:aws:microvm-image:al2023-1");
+      expect(create?.input.baseImageArn).toBe(
+        "arn:aws:lambda:us-west-2:aws:microvm-image:al2023-1",
+      );
     } finally {
       vi.unstubAllEnvs();
     }
@@ -422,15 +425,15 @@ describe("run", () => {
     expect(lines[0]).toContain("m-1");
     expect(lines[0]).toContain("e.lambda-microvm.on.aws");
     const run = client.callsOf("RunMicrovmCommand")[0];
-    expect(run.input.imageIdentifier).toBe(ARN);
-    expect(run.input.imageVersion).toBe("1.0");
+    expect(run?.input.imageIdentifier).toBe(ARN);
+    expect(run?.input.imageVersion).toBe("1.0");
   });
 
   it("attaches the managed HTTP_INGRESS + SHELL_INGRESS connectors (never ALL_INGRESS)", async () => {
     const { client, context } = ctx();
     await cmdRun(parseArgs(["--image", "demo"]), context);
     // RunMicrovm rejects ALL_INGRESS combined with any other ingress connector.
-    expect(client.callsOf("RunMicrovmCommand")[0].input.ingressNetworkConnectors).toEqual([
+    expect(client.callsOf("RunMicrovmCommand")[0]?.input.ingressNetworkConnectors).toEqual([
       "arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:HTTP_INGRESS",
       "arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:SHELL_INGRESS",
     ]);
@@ -439,11 +442,11 @@ describe("run", () => {
   it("--image-version pins the version; --version works as a compat alias", async () => {
     const { client, context } = ctx();
     await cmdRun(parseArgs(["--image", "demo", "--image-version", "9.9"]), context);
-    expect(client.callsOf("RunMicrovmCommand")[0].input.imageVersion).toBe("9.9");
+    expect(client.callsOf("RunMicrovmCommand")[0]?.input.imageVersion).toBe("9.9");
 
     const c2 = ctx();
     await cmdRun(parseArgs(["--image", "demo", "--version", "8.8"]), c2.context);
-    expect(c2.client.callsOf("RunMicrovmCommand")[0].input.imageVersion).toBe("8.8");
+    expect(c2.client.callsOf("RunMicrovmCommand")[0]?.input.imageVersion).toBe("8.8");
 
     // --image-version wins when both are present.
     const c3 = ctx();
@@ -451,13 +454,13 @@ describe("run", () => {
       parseArgs(["--image", "demo", "--image-version", "7.7", "--version", "8.8"]),
       c3.context,
     );
-    expect(c3.client.callsOf("RunMicrovmCommand")[0].input.imageVersion).toBe("7.7");
+    expect(c3.client.callsOf("RunMicrovmCommand")[0]?.input.imageVersion).toBe("7.7");
   });
 
   it("--json emits only safe public fields (no client/token internals)", async () => {
     const { context, lines } = ctx();
     await cmdRun(parseArgs(["--image", "demo", "--json"]), context);
-    const out = JSON.parse(lines[0]);
+    const out = JSON.parse(lines[0] ?? "");
     expect(out.microvmId).toBe("m-1");
     // The real API returns a bare host; the SDK prepends https:// itself.
     expect(out.endpoint).toBe("e.lambda-microvm.on.aws");
@@ -498,7 +501,7 @@ describe("run", () => {
     const { client, context } = ctx();
     await cmdRun(parseArgs(["--image", "demo", "--no-auto-resume"]), context);
     const run = client.callsOf("RunMicrovmCommand")[0];
-    expect(run.input.idlePolicy).toMatchObject({ autoResumeEnabled: false });
+    expect(run?.input.idlePolicy).toMatchObject({ autoResumeEnabled: false });
   });
 
   it("rejects stray positional arguments", async () => {
@@ -684,7 +687,7 @@ describe("run", () => {
       expect(runSent).toBe(true);
       const added = process.listeners("SIGINT").filter((l) => !before.includes(l));
       expect(added).toHaveLength(1);
-      added[0](); // SIGINT while vmId is still unknown
+      added[0]?.("SIGINT"); // SIGINT while vmId is still unknown
       await new Promise((r) => setTimeout(r, 20));
       // Must NOT exit — the pending RunMicrovm may have created a VM.
       expect(exits).toHaveLength(0);
@@ -781,17 +784,17 @@ describe("list & status", () => {
     const { client, context } = ctx();
     await cmdLs(parseArgs(["--image", "demo"]), context);
     const list = client.callsOf("ListMicrovmsCommand")[0];
-    expect(list.input.imageIdentifier).toBe(ARN);
+    expect(list?.input.imageIdentifier).toBe(ARN);
   });
 
   it("ls accepts --image-version and the --version compat alias", async () => {
     const { client, context } = ctx();
     await cmdLs(parseArgs(["--image-version", "2.0"]), context);
-    expect(client.callsOf("ListMicrovmsCommand")[0].input.imageVersion).toBe("2.0");
+    expect(client.callsOf("ListMicrovmsCommand")[0]?.input.imageVersion).toBe("2.0");
 
     const c2 = ctx();
     await cmdLs(parseArgs(["--version", "3.0"]), c2.context);
-    expect(c2.client.callsOf("ListMicrovmsCommand")[0].input.imageVersion).toBe("3.0");
+    expect(c2.client.callsOf("ListMicrovmsCommand")[0]?.input.imageVersion).toBe("3.0");
   });
 });
 
@@ -806,6 +809,7 @@ describe("logs", () => {
         logStreamNamePrefix?: string;
         logStreamName?: string;
         nextToken?: string;
+        limit?: number;
       };
       switch (name) {
         case "DescribeLogGroupsCommand":
@@ -858,8 +862,8 @@ describe("logs", () => {
     // Pages: initial + repeated-token probe, then stops.
     const gets = fake.inputs("GetLogEventsCommand");
     expect(gets).toHaveLength(2);
-    expect(gets[1].nextToken).toBe("f2");
-    expect(gets[0].logGroupName).toBe("/aws/lambda-microvms/");
+    expect(gets[1]?.nextToken).toBe("f2");
+    expect(gets[0]?.logGroupName).toBe("/aws/lambda-microvms/");
     // Over-matching "m-10-impostor" streams must be filtered out.
     expect(gets.every((g) => g.logStreamName === "m-1")).toBe(true);
     expect(lines.map((l) => l.replace(/^\S+ /, ""))).toEqual(["a", "b"]);
@@ -877,7 +881,7 @@ describe("logs", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("b");
     // Backward fetch used limit, not a full forward drain.
-    expect(fake.inputs("GetLogEventsCommand")[0].limit).toBe(1);
+    expect(fake.inputs("GetLogEventsCommand")[0]?.limit).toBe(1);
   });
 
   it("errors when no streams match", async () => {
@@ -1011,7 +1015,7 @@ describe("logs", () => {
       out: (l) => lines.push(l),
     });
     expect(code).toBe(0);
-    expect(fake.inputs("GetLogEventsCommand")[0].logGroupName).toBe("/aws/lambda-microvms/demo");
+    expect(fake.inputs("GetLogEventsCommand")[0]?.logGroupName).toBe("/aws/lambda-microvms/demo");
     expect(lines[0]).toContain("found");
   });
 

@@ -10,6 +10,7 @@ needs ≥20.19 — use the latest Node 20.x or newer.
 ```bash
 npm install
 npm run build     # sdk → agent, cdk, cli (dependency order)
+npm run typecheck # tsc over src, tests and examples (after build)
 npm test          # vitest — offline, no AWS credentials needed
 npm run check     # biome lint + format
 ```
@@ -24,5 +25,5 @@ npm run check     # biome lint + format
 ## Pull requests
 
 - Keep changes focused; add regression tests for bug fixes
-- `npm run build && npm test && npm run check` must be green
+- `npm run build && npm run typecheck && npm test && npm run check` must be green
 - Describe the "why", not just the "what"

@@ -3,7 +3,9 @@ import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import { MicrovmNetworkConnector } from "../src/index.js";
 
-function stackWithConnector(props?: Partial<Parameters<typeof MicrovmNetworkConnector>[2]>) {
+function stackWithConnector(
+  props?: Partial<ConstructorParameters<typeof MicrovmNetworkConnector>[2]>,
+) {
   const app = new App();
   const stack = new Stack(app, "TestStack");
   const vpc = new ec2.Vpc(stack, "Vpc", { maxAzs: 2 });
