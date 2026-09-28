@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import {
   chmodSync,
+  existsSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
@@ -46,6 +47,41 @@ async function post(port: number, route: string, body: unknown): Promise<Respons
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+/** Reads the pid a shell command wrote to `file`, waiting until it is complete. */
+async function readPid(file: string): Promise<number> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const m = existsSync(file) ? /^(\d+)\n$/.exec(readFileSync(file, "utf8")) : null;
+    if (m) return Number(m[1]);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error(`no pid in ${file}`);
+}
+
+/** True once `pid` no longer exists (killed and reaped). */
+async function gone(pid: number): Promise<boolean> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code === "ESRCH";
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  return false;
+}
+
+function kill(pid: number): void {
+  // Never 0 or negative: those signal the test runner's process group.
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // already gone
+  }
 }
 
 describe("exec API", () => {
@@ -108,16 +144,21 @@ describe("exec API", () => {
     // sh exits immediately but the backgrounded sleep inherits stdout — the
     // response must not wait for the grandchild to die.
     const start = Date.now();
-    const res = await post(apiPort, "/exec", { command: "sleep 10 & echo done" });
+    const res = await post(apiPort, "/exec", { command: "sleep 10 & echo $!" });
     const out = (await res.json()) as {
       exitCode: number;
       stdout: string;
       outputIncomplete?: boolean;
     };
-    expect(out.exitCode).toBe(0);
-    expect(Buffer.from(out.stdout, "base64").toString()).toBe("done\n");
-    expect(out.outputIncomplete).toBe(true);
-    expect(Date.now() - start).toBeLessThan(15_000);
+    const stdout = Buffer.from(out.stdout, "base64").toString();
+    try {
+      expect(out.exitCode).toBe(0);
+      expect(stdout).toMatch(/^\d+\n$/);
+      expect(out.outputIncomplete).toBe(true);
+      expect(Date.now() - start).toBeLessThan(5_000);
+    } finally {
+      kill(Number(stdout));
+    }
   });
 
   it("rejects malformed requests", async () => {
@@ -371,9 +412,12 @@ describe("hooks server", () => {
     await s.close();
   });
 
-  it("env hooks return promptly when the command backgrounds a process", async () => {
+  it("env hooks return promptly and leave a backgrounded process running", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "sunaba-hooks-"));
+    const pidFile = path.join(dir, "pid");
     const prev = process.env.SUNABA_HOOK_READY;
-    process.env.SUNABA_HOOK_READY = "sleep 30 & echo ok";
+    process.env.SUNABA_HOOK_READY = `sleep 30 & echo $! > "${pidFile}"`;
+    let pid = 0;
     try {
       const s = startAgent({ port: 0, hooksPort: 0, host: "127.0.0.1", hooks: envHookHandlers() });
       await new Promise((r) => setImmediate(r));
@@ -381,11 +425,16 @@ describe("hooks server", () => {
       const start = Date.now();
       const res = await post(hp, "/aws/lambda-microvms/runtime/v1/ready", {});
       expect(res.status).toBe(200);
-      expect(Date.now() - start).toBeLessThan(15_000);
+      expect(Date.now() - start).toBeLessThan(5_000);
       await s.close();
+      // A daemon started by a hook outlives the hook command and close().
+      pid = await readPid(pidFile);
+      expect(() => process.kill(pid, 0)).not.toThrow();
     } finally {
+      kill(pid);
       if (prev === undefined) delete process.env.SUNABA_HOOK_READY;
       else process.env.SUNABA_HOOK_READY = prev;
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -453,20 +502,33 @@ describe("agent wiring", () => {
   });
 
   it("close() resolves promptly with an in-flight exec and reaps it", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "sunaba-close-"));
+    const pidFile = path.join(dir, "pid");
     const s = startAgent({ port: 0, hooksPort: 0, host: "127.0.0.1", hooks: false });
-    await new Promise((r) => setImmediate(r));
-    const port = addr(s.api);
-    const inflight = post(port, "/exec", { argv: ["sleep", "60"], timeoutMs: 55_000 }).then(
-      (r) => r.status,
-      (e) => e,
-    );
-    // Give the request a beat to reach the server, then close.
-    await new Promise((r) => setTimeout(r, 100));
-    const start = Date.now();
-    await s.close();
-    expect(Date.now() - start).toBeLessThan(5_000);
-    await inflight; // must settle — resolved or fetch-aborted
+    let pid = 0;
+    try {
+      await new Promise((r) => setImmediate(r));
+      const port = addr(s.api);
+      const inflight = post(port, "/exec", {
+        command: `echo $$ > "${pidFile}"; exec sleep 60`,
+        timeoutMs: 55_000,
+      }).then(
+        (r) => r.status,
+        (e) => e,
+      );
+      // Close only once the command is running.
+      pid = await readPid(pidFile);
+      const start = Date.now();
+      await s.close();
+      expect(Date.now() - start).toBeLessThan(5_000);
+      await inflight; // must settle — resolved or fetch-aborted
+      expect(await gone(pid)).toBe(true);
+    } finally {
+      kill(pid);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
+
   it("drops a request whose body stalls for 60 s", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const sock = connect(apiPort, "127.0.0.1");
