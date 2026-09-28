@@ -18,11 +18,12 @@ await sb.terminate();
 
 - `Sandbox.create / connect` — launch or attach (auto-resumes SUSPENDED)
 - `sb.exec / sb.interactiveShell` — managed `SHELL_INGRESS` WebSocket PTY, no guest agent needed
-- `sb.writeFile / readFile / request` — fs helpers + authenticated HTTP to in-VM ports
+- `sb.writeFile / readFile / request / websocket` — fs helpers + authenticated HTTP and WebSocket to in-VM ports
 - `buildMicrovmImage` — zip → S3 → `CreateMicrovmImage` → `SUCCESSFUL` wait
 - `AuthTokenManager` / `ShellTokenManager` — JWE mint + auto-refresh, port-scoped
 - `waitForMicrovmState`, `listMicrovms`, `resolveImageArn`, `latestActiveVersion`
+- `sunaba-sdk/guest` — `startHooksServer` serves the lifecycle hooks (`/run`, `/suspend`, …) from your app inside the VM
 
-Docs and full API: https://github.com/seike460/sunaba#readme
+Docs: https://github.com/seike460/sunaba#readme
 
 License: Apache-2.0

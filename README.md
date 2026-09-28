@@ -130,7 +130,8 @@ const execRole = new MicrovmExecutionRole(this, "ExecRole");
 
 You only need it if you want HTTP semantics or run-hooks. For plain
 command execution, the managed shell (`Sandbox.exec`) needs nothing in
-the image.
+the image. To serve the lifecycle hooks from your own app instead, use
+`startHooksServer` from `sunaba-sdk/guest`.
 
 ## Configuration
 
