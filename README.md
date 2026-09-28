@@ -51,8 +51,9 @@ sunaba resume <id>
 sunaba rm <id>                   # terminate
 ```
 
-`sunaba run` attaches the managed `ALL_INGRESS` + `SHELL_INGRESS`
-connectors, so `exec`/`shell` work with **no agent inside the image**.
+`sunaba run` attaches the managed `HTTP_INGRESS` + `SHELL_INGRESS`
+connectors (`ALL_INGRESS` cannot be combined with other connectors),
+so `exec`/`shell` work with **no agent inside the image**.
 
 ## SDK
 

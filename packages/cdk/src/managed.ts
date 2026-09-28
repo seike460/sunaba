@@ -7,8 +7,10 @@ import type { Construct } from "constructs";
  *   arn:aws:lambda:{region}:aws:network-connector:aws-network-connector:{NAME}
  */
 export const ManagedIngressConnector = {
-  /** Inbound HTTPS to the MicroVM endpoint, JWE-authenticated. */
+  /** All inbound traffic. Cannot be combined with other ingress connectors. */
   ALL: "ALL_INGRESS",
+  /** Inbound HTTPS to the MicroVM endpoint, JWE-authenticated. */
+  HTTP: "HTTP_INGRESS",
   /** No inbound connectivity. */
   NONE: "NO_INGRESS",
   /** WebSocket PTY shell access on /shell (port 8022). */

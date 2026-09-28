@@ -31,8 +31,10 @@ import { getMicrovm, waitForMicrovmState } from "./waiters.js";
 /** Methods that are safe to auto-retry after a failed request. */
 const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE"]);
 
+// ALL_INGRESS cannot be combined with other connectors, so the default
+// uses the granular pair: HTTP for request(), SHELL for exec()/shell.
 const DEFAULT_INGRESS: readonly string[] = [
-  ManagedIngressConnector.ALL,
+  ManagedIngressConnector.HTTP,
   ManagedIngressConnector.SHELL,
 ];
 

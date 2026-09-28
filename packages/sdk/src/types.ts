@@ -112,8 +112,10 @@ export interface SandboxCreateOptions extends ClientOptions {
   idlePolicy?: IdlePolicy;
   maximumDurationSeconds?: number;
   /**
-   * Ingress connector refs: managed names (ALL_INGRESS, SHELL_INGRESS, NO_INGRESS)
-   * or full ARNs. Default [ALL_INGRESS, SHELL_INGRESS] so exec() works.
+   * Ingress connector refs: managed names (HTTP_INGRESS, SHELL_INGRESS,
+   * ALL_INGRESS, NO_INGRESS) or full ARNs. ALL_INGRESS cannot be combined
+   * with other connectors. Default [HTTP_INGRESS, SHELL_INGRESS] so both
+   * request() and exec() work.
    */
   ingress?: readonly string[];
   /**

@@ -49,9 +49,16 @@ describe("Sandbox.create", () => {
     const run = client.callsOf("RunMicrovmCommand")[0];
     expect(run.input.imageIdentifier).toBe(ARN);
     expect(run.input.imageVersion).toBe("1.0");
-    // Default ingress includes managed shell so exec() works.
+    // Default ingress is HTTP+SHELL — ALL_INGRESS cannot be combined
+    // with other connectors (rejected by the Lambda MicroVMs API).
+    expect(run.input.ingressNetworkConnectors).toContain(
+      "arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:HTTP_INGRESS",
+    );
     expect(run.input.ingressNetworkConnectors).toContain(
       "arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:SHELL_INGRESS",
+    );
+    expect(run.input.ingressNetworkConnectors).not.toContain(
+      "arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:ALL_INGRESS",
     );
     expect(run.input.egressNetworkConnectors).toEqual([
       "arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:INTERNET_EGRESS",

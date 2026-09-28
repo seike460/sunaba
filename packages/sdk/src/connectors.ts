@@ -11,8 +11,11 @@ import { SunabaError } from "./errors.js";
  * customer-managed VPC egress connectors created via lambda-core).
  */
 export const ManagedIngressConnector = {
-  /** Inbound HTTPS to the MicroVM endpoint, JWE-authenticated. */
+  /** All inbound traffic to the MicroVM endpoint. Cannot be combined with
+   * other ingress connectors — use HTTP_INGRESS/SHELL_INGRESS instead. */
   ALL: "ALL_INGRESS",
+  /** Inbound HTTPS to the MicroVM endpoint, JWE-authenticated. */
+  HTTP: "HTTP_INGRESS",
   /** No inbound connectivity. */
   NONE: "NO_INGRESS",
   /** WebSocket PTY shell access on /shell (port 8022). */
