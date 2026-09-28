@@ -32,6 +32,10 @@ npm run check     # biome lint + format
 
 ## Releasing
 
+Record user-visible changes under `[Unreleased]` in `CHANGELOG.md`. The
+release commit moves them under the new version, and that section becomes
+the body of the GitHub release.
+
 Tag, `npm publish` and create the GitHub release only from a commit whose
 `ci` run on `main` passed on every Node version:
 
