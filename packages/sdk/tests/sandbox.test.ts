@@ -120,6 +120,59 @@ describe("Sandbox.request", () => {
     expect(res.status).toBe(200);
     expect(calls).toBe(2);
   });
+
+  it.each([
+    "https://idp.example/login",
+    "http://vm.example/login", // same host, but a TLS downgrade is another origin
+  ])("returns a redirect to %s unfollowed so the token stays on the endpoint", async (location) => {
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string | URL, init?: RequestInit) => {
+      urls.push(String(url));
+      expect(init?.redirect).toBe("manual");
+      return new Response(null, { status: 302, headers: { location } });
+    });
+    const res = await sbx.request("/");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(location);
+    expect(urls).toEqual(["https://vm.example/"]);
+  });
+
+  it("follows a same-origin redirect with the auth and port headers", async () => {
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    const seen: { url: string; headers: Record<string, string> }[] = [];
+    vi.stubGlobal("fetch", async (url: string | URL, init?: RequestInit) => {
+      seen.push({ url: String(url), headers: Object.fromEntries(new Headers(init?.headers)) });
+      return seen.length === 1
+        ? new Response(null, { status: 301, headers: { location: "/docs/" } })
+        : new Response("ok");
+    });
+    const res = await sbx.request("/docs", { port: 3000 });
+    expect(await res.text()).toBe("ok");
+    expect(seen.map((s) => s.url)).toEqual(["https://vm.example/docs", "https://vm.example/docs/"]);
+    expect(seen[1]?.headers["x-aws-proxy-auth"]).toBe("TOK");
+    expect(seen[1]?.headers["x-aws-proxy-port"]).toBe("3000");
+  });
+
+  it("turns a POST into a body-less GET on a same-origin 303, like fetch()", async () => {
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    const seen: RequestInit[] = [];
+    vi.stubGlobal("fetch", async (_url: string | URL, init?: RequestInit) => {
+      seen.push(init ?? {});
+      return seen.length === 1
+        ? new Response(null, { status: 303, headers: { location: "/result" } })
+        : new Response("done");
+    });
+    await sbx.request("/jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(seen[1]?.method).toBe("GET");
+    expect(seen[1]?.body).toBeUndefined();
+    expect(new Headers(seen[1]?.headers).has("content-type")).toBe(false);
+    expect(new Headers(seen[1]?.headers).get("x-aws-proxy-auth")).toBe("TOK");
+  });
 });
 
 describe("latestActiveVersion", () => {

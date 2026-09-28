@@ -31,6 +31,12 @@ import { getMicrovm, waitForMicrovmState } from "./waiters.js";
 /** Methods that are safe to auto-retry after a failed request. */
 const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE"]);
 
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+/** Same hop limit as fetch()'s own redirect handling. */
+const MAX_REDIRECTS = 20;
+/** Headers fetch() drops when a redirect turns the request into a GET. */
+const BODY_HEADERS = ["content-type", "content-encoding", "content-language", "content-location"];
+
 // ALL_INGRESS cannot be combined with other connectors, so the default
 // uses the granular pair: HTTP for request(), SHELL for exec()/shell.
 const DEFAULT_INGRESS: readonly string[] = [
@@ -237,8 +243,11 @@ export class Sandbox {
 
   /**
    * Authenticated HTTPS request to the app inside the MicroVM.
-   * Adds `X-aws-proxy-auth` (JWE) and `X-aws-proxy-port` headers,
-   * refreshing the token and retrying once on 403.
+   * Adds `X-aws-proxy-auth` (JWE) and `X-aws-proxy-port` headers.
+   * Retries once on 401/403 with a fresh token, and up to twice on 429/5xx —
+   * only for idempotent methods or `retry: true`, never for a ReadableStream
+   * body. Redirects are followed only within the endpoint's origin; a 3xx to
+   * any other origin is returned as-is so the token never leaves it.
    */
   async request(path: string, opts: RequestOptions = {}): Promise<Response> {
     const url = `https://${this.endpoint}${path.startsWith("/") ? path : `/${path}`}`;
@@ -254,23 +263,20 @@ export class Sandbox {
       ...(opts.body instanceof ReadableStream ? ({ duplex: "half" } as RequestInit) : {}),
       ...(opts.signal ? { signal: opts.signal } : {}),
     };
-    const drain = async (r: Response) => {
-      await r.arrayBuffer().catch(() => {}); // free the keep-alive connection
-    };
     // Auto-retry only for idempotent methods — a POST whose response was
     // lost after the side effect would otherwise execute twice. Callers
     // can opt in with `retry: true` when their endpoint is idempotent.
     const autoRetry =
       retryableBody &&
       (IDEMPOTENT_METHODS.has((opts.method ?? "GET").toUpperCase()) || opts.retry === true);
-    let res = await fetch(url, init);
+    let res = await fetchSameOrigin(url, init);
     if (res.status === 401 || res.status === 403) {
       this.auth.invalidate(); // even for stream bodies: drop the dead token
     }
     if (autoRetry && (res.status === 401 || res.status === 403)) {
       await drain(res);
       headers.set("X-aws-proxy-auth", await this.auth.get());
-      res = await fetch(url, init);
+      res = await fetchSameOrigin(url, init);
     }
     // Transient 429/5xx: up to 2 retries with light backoff.
     for (let i = 0; autoRetry && i < 2 && (res.status === 429 || res.status >= 500); i++) {
@@ -278,7 +284,7 @@ export class Sandbox {
       await drain(res);
       const retryAfterMs = Number.isFinite(retryAfter) ? Math.min(retryAfter * 1000, 10_000) : 0;
       await sleep(Math.max(retryAfterMs, 250 * (i + 1)));
-      res = await fetch(url, init);
+      res = await fetchSameOrigin(url, init);
     }
     return res;
   }
@@ -501,6 +507,51 @@ export class Sandbox {
       const info = await getMicrovm(this.client, this.microvmId);
       if (!info.state || !goalStates.includes(info.state)) throw e;
     }
+  }
+}
+
+/** Read and discard a body to free the keep-alive connection. */
+async function drain(r: Response): Promise<void> {
+  await r.arrayBuffer().catch(() => {});
+}
+
+/**
+ * fetch() that follows redirects only within the origin of `url`. fetch()
+ * itself forwards custom headers such as `X-aws-proxy-auth` to whatever
+ * origin a redirect names, so any other 3xx is returned unfollowed.
+ */
+async function fetchSameOrigin(url: string, init: RequestInit): Promise<Response> {
+  const origin = new URL(url).origin;
+  let target = url;
+  let req = init;
+  for (let hops = 0; ; hops++) {
+    const res = await fetch(target, { ...req, redirect: "manual" });
+    const location = res.headers.get("location");
+    if (
+      !REDIRECT_STATUSES.has(res.status) ||
+      location === null ||
+      hops === MAX_REDIRECTS ||
+      !URL.canParse(location, target)
+    ) {
+      return res;
+    }
+    const next = new URL(location, target);
+    if (next.origin !== origin) return res;
+    // Same method rewrite as fetch(): 301/302 turn a POST into a GET, and
+    // 303 turns anything but GET/HEAD into a GET, dropping the body.
+    const method = (req.method ?? "GET").toUpperCase();
+    if (
+      ((res.status === 301 || res.status === 302) && method === "POST") ||
+      (res.status === 303 && method !== "GET" && method !== "HEAD")
+    ) {
+      const headers = new Headers(req.headers);
+      for (const name of BODY_HEADERS) headers.delete(name);
+      req = { method: "GET", headers, ...(req.signal ? { signal: req.signal } : {}) };
+    } else if (req.body instanceof ReadableStream) {
+      return res; // the first send consumed the stream; it cannot be replayed
+    }
+    await drain(res);
+    target = next.href;
   }
 }
 
