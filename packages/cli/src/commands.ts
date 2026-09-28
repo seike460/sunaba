@@ -705,6 +705,23 @@ export async function cmdRm(args: ParsedArgs, ctx: CliContext): Promise<number> 
 
 const LOG_GROUP_PREFIX = "/aws/lambda-microvms";
 
+interface LogEvent {
+  timestamp?: number;
+  message?: string;
+}
+
+const ESC = String.fromCharCode(0x1b);
+// Messages come from code inside the sandbox — untrusted. Drop CSI
+// sequences (colors, cursor moves) whole and every other control
+// character except tab and newline, so a message cannot drive the
+// viewer's terminal.
+const LOG_CONTROL_RE = new RegExp(`${ESC}\\[[0-?]*[ -/]*[@-~]|(?![\\t\\n])\\p{Cc}`, "gu");
+
+function formatLogEvent(ev: LogEvent): string {
+  const message = (ev.message ?? "").replace(LOG_CONTROL_RE, "");
+  return `${new Date(ev.timestamp ?? 0).toISOString()} ${message}`;
+}
+
 async function logsClient(ctx: CliContext): Promise<LogsClient> {
   if (ctx.logsClient) return ctx.logsClient;
   const { CloudWatchLogsClient } = await import("@aws-sdk/client-cloudwatch-logs");
@@ -848,13 +865,13 @@ export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number
   // nextForwardToken is a per-stream cursor — track them separately.
   const tokens = new Map<string, string | undefined>();
   if (!follow) {
-    const events: { timestamp?: number; message?: string }[] = [];
+    const events: LogEvent[] = [];
     // Single stream with no --tail: stream output directly instead of
     // buffering the whole history in memory.
     const printNow = names.length === 1 && tail === undefined;
-    const emit = (ev: { timestamp?: number; message?: string }) => {
+    const emit = (ev: LogEvent) => {
       if (printNow) {
-        stdout(ctx)(`${new Date(ev.timestamp ?? 0).toISOString()} ${ev.message ?? ""}`);
+        stdout(ctx)(formatLogEvent(ev));
       } else {
         events.push(ev);
       }
@@ -872,7 +889,7 @@ export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number
               ...(next ? { nextToken: next } : {}),
             }),
           )) as {
-            events?: { timestamp?: number; message?: string }[];
+            events?: LogEvent[];
             nextForwardToken?: string;
           };
           for (const ev of res.events ?? []) emit(ev);
@@ -892,7 +909,7 @@ export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number
               ...(back ? { nextToken: back } : {}),
             }),
           )) as {
-            events?: { timestamp?: number; message?: string }[];
+            events?: LogEvent[];
             nextBackwardToken?: string;
           };
           const got = res.events ?? [];
@@ -907,7 +924,7 @@ export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number
     }
     events.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
     for (const ev of events.slice(tail !== undefined ? -tail : 0)) {
-      stdout(ctx)(`${new Date(ev.timestamp ?? 0).toISOString()} ${ev.message ?? ""}`);
+      stdout(ctx)(formatLogEvent(ev));
     }
     return 0;
   }
@@ -922,7 +939,7 @@ export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number
         ...(next ? { nextToken: next } : {}),
       }),
     ) as Promise<{
-      events?: { timestamp?: number; message?: string }[];
+      events?: LogEvent[];
       nextForwardToken?: string;
     }>;
   const MAX_PAGES = 10; // cap work per stream per cycle — busy streams
@@ -949,7 +966,7 @@ export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number
       try {
         const res = await get(streamName, next);
         for (const ev of res.events ?? []) {
-          stdout(ctx)(`${new Date(ev.timestamp ?? 0).toISOString()} ${ev.message ?? ""}`);
+          stdout(ctx)(formatLogEvent(ev));
         }
         if (res.nextForwardToken) tokens.set(streamName, res.nextForwardToken);
         if (!res.nextForwardToken || res.nextForwardToken === next) break;
@@ -972,7 +989,7 @@ export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number
         for (let page = 0; page < MAX_PAGES; page++) {
           const res = await get(streamName, tokens.get(streamName));
           for (const ev of res.events ?? []) {
-            stdout(ctx)(`${new Date(ev.timestamp ?? 0).toISOString()} ${ev.message ?? ""}`);
+            stdout(ctx)(formatLogEvent(ev));
           }
           const prev = tokens.get(streamName);
           if (res.nextForwardToken) tokens.set(streamName, res.nextForwardToken);

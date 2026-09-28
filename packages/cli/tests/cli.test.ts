@@ -1022,6 +1022,29 @@ describe("logs", () => {
       true,
     );
   });
+
+  it("drops terminal control sequences from log messages", async () => {
+    // Messages are written by code inside the sandbox — they must not
+    // reach the viewer's terminal as escape sequences.
+    class HostileLogs extends FakeLogs {
+      override async send(command: unknown): Promise<unknown> {
+        const name = (command as { constructor: { name: string } }).constructor.name;
+        if (name !== "GetLogEventsCommand") return super.send(command);
+        this.calls.push(command);
+        const { nextToken } = (command as { input: { nextToken?: string } }).input;
+        const message = "\u001b]0;title\u0007\u001b[31mred\u001b[0m\ttab\r\nnext\u009b2Jend";
+        return { events: nextToken ? [] : [{ timestamp: 1, message }], nextForwardToken: "f1" };
+      }
+    }
+    const lines: string[] = [];
+    const code = await cmdLogs(parseArgs(["m-1", "--group", "g"]), {
+      region: "us-east-1",
+      logsClient: new HostileLogs(),
+      out: (l) => lines.push(l),
+    });
+    expect(code).toBe(0);
+    expect(lines).toEqual(["1970-01-01T00:00:00.001Z ]0;titlered\ttab\nnext2Jend"]);
+  });
 });
 
 describe("lifecycle", () => {
