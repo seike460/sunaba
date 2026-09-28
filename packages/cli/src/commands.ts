@@ -928,8 +928,9 @@ export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number
     }
     return 0;
   }
-  // --follow: `tail -f` semantics — drain the backlog first (bounded),
-  // then poll and print only new events. A repeated token = end-of-stream.
+  // --follow: like `docker logs -f`, not `tail -f` — print every stream
+  // from its head, then keep polling from the saved token for new events.
+  // A repeated token = end-of-stream.
   const get = (streamName: string, next?: string) =>
     cw.send(
       new GetLogEventsCommand({
@@ -954,9 +955,10 @@ export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number
       String(e),
     );
   };
-  // Initial backlog: print as we go so nothing is dropped; the page cap
-  // bounds how much history we show before switching to live-follow, and
-  // the attempt cap stops a persistently-failing stream from wedging
+  // Initial backlog: print as we go so nothing is dropped. The page cap
+  // only bounds this first pass per stream — a longer history keeps
+  // printing in the polling loop below, MAX_PAGES per stream per cycle.
+  // The attempt cap stops a persistently-failing stream from wedging
   // peers or the follow loop entirely.
   const MAX_ATTEMPTS = 5;
   for (const streamName of names) {

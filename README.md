@@ -43,7 +43,7 @@ sunaba build                     # zip → S3 → CreateMicrovmImage → SUCCESS
 sunaba run --rm --exec "uname -a"  # run a command; --rm deletes the VM after
 sunaba run --shell               # interactive PTY shell
 sunaba ls                        # list MicroVMs (non-terminated; --all for all)
-sunaba logs <id> --follow        # tail CloudWatch logs
+sunaba logs <id> --follow        # print CloudWatch logs, then follow new ones
 sunaba suspend <id>              # pause; auto-terminates after the VM's
                                  # suspendedDurationSeconds (default 300 s —
                                  # set --suspended at `sunaba run`, max 8 h)
