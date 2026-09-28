@@ -16,7 +16,6 @@
     "verbatimModuleSyntax": true,
     "noUncheckedIndexedAccess": true,
     "noFallthroughCasesInSwitch": true,
-    "noImplicitOverride": true,
-    "resolveJsonModule": true
+    "noImplicitOverride": true
   }
 }
