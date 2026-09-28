@@ -57,6 +57,8 @@ export interface HooksServerOptions {
 /**
  * Starts a tiny HTTP server implementing the MicroVM lifecycle hooks.
  * Returns the Server (caller may also keep a reference for shutdown).
+ * A handler that throws gets 503 (the error goes to console.error); a
+ * body that isn't valid JSON gets 400 without invoking the handler.
  */
 export function startHooksServer(handlers: HooksHandlers, opts: HooksServerOptions = {}): Server {
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -80,13 +82,22 @@ export function startHooksServer(handlers: HooksHandlers, opts: HooksServerOptio
       res.writeHead(200).end();
       return;
     }
+    let body: unknown;
     try {
-      const body = await readJson(req, opts.maxBodyBytes ?? 1_048_576);
-      await handler(body);
-      res.writeHead(200).end();
+      body = await readJson(req, opts.maxBodyBytes ?? 1_048_576);
     } catch (e) {
-      res.writeHead(e instanceof BodyTooLarge ? 413 : 503).end();
+      const status = e instanceof BodyTooLarge ? 413 : e instanceof InvalidJson ? 400 : 503;
+      res.writeHead(status).end();
+      return;
     }
+    try {
+      await handler(body);
+    } catch (e) {
+      res.writeHead(503).end();
+      console.error("[sunaba-hooks]", `hook ${name} failed:`, e);
+      return;
+    }
+    res.writeHead(200).end();
   });
   server.on("error", (e) => {
     if (opts.onError) opts.onError(e);
@@ -97,6 +108,7 @@ export function startHooksServer(handlers: HooksHandlers, opts: HooksServerOptio
 }
 
 class BodyTooLarge extends Error {}
+class InvalidJson extends Error {}
 
 async function readJson(req: IncomingMessage, maxBytes: number): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -115,6 +127,6 @@ async function readJson(req: IncomingMessage, maxBytes: number): Promise<unknown
   try {
     return JSON.parse(text);
   } catch {
-    return {};
+    throw new InvalidJson("hook body is not valid JSON");
   }
 }

@@ -62,16 +62,44 @@ describe("startHooksServer", () => {
     expect(res.status).toBe(200); // acknowledged, never invoked
   });
 
-  it("returns 503 when a handler throws", async () => {
+  it("returns 503 when a handler throws and reports the error", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const err = new Error("not ready");
     server = startHooksServer(
       {
         suspend: () => {
-          throw new Error("not ready");
+          throw err;
         },
       },
       { port: 0, host: "127.0.0.1" },
     );
     const port = await listening(server);
-    expect((await post(port, "/aws/lambda-microvms/runtime/v1/suspend")).status).toBe(503);
+    try {
+      expect((await post(port, "/aws/lambda-microvms/runtime/v1/suspend")).status).toBe(503);
+      expect(logged).toHaveBeenCalledWith("[sunaba-hooks]", "hook suspend failed:", err);
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  it("returns 400 for a malformed JSON body without invoking the handler", async () => {
+    const onRun = vi.fn();
+    server = startHooksServer({ run: onRun }, { port: 0, host: "127.0.0.1" });
+    const port = await listening(server);
+    const res = await fetch(`http://127.0.0.1:${port}/aws/lambda-microvms/runtime/v1/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"microvmId":',
+    });
+    expect(res.status).toBe(400);
+    expect(onRun).not.toHaveBeenCalled();
+  });
+
+  it("hands an empty body to the handler as {}", async () => {
+    const onSuspend = vi.fn();
+    server = startHooksServer({ suspend: onSuspend }, { port: 0, host: "127.0.0.1" });
+    const port = await listening(server);
+    expect((await post(port, "/aws/lambda-microvms/runtime/v1/suspend")).status).toBe(200);
+    expect(onSuspend).toHaveBeenCalledWith({});
   });
 });
