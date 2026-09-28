@@ -8,11 +8,13 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./guest": {
       "types": "./dist/guest/index.d.ts",
-      "import": "./dist/guest/index.js"
+      "import": "./dist/guest/index.js",
+      "default": "./dist/guest/index.js"
     }
   },
   "typesVersions": {

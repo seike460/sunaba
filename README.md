@@ -28,6 +28,9 @@ top that every application ends up needing:
 ## Requirements
 
 - Node.js ≥ 20
+- The packages are ESM-only. CommonJS projects (such as the app from
+  `cdk init app --language typescript`) load them with `require(esm)`,
+  which needs Node.js ≥ 20.19 or ≥ 22.12
 - AWS credentials with Lambda MicroVMs permissions
 - A region where Lambda MicroVMs is available (e.g. `us-east-1`, `ap-northeast-1`)
 
