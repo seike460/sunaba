@@ -27,3 +27,14 @@ npm run check     # biome lint + format
 - Keep changes focused; add regression tests for bug fixes
 - `npm run build && npm run typecheck && npm test && npm run check` must be green
 - Describe the "why", not just the "what"
+
+## Releasing
+
+Tag, `npm publish` and create the GitHub release only from a commit whose
+`ci` run on `main` passed on every Node version:
+
+```bash
+sha=$(git rev-parse HEAD)
+run=$(gh run list --workflow ci --commit "$sha" --event push --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run watch "${run:?no ci run for $sha yet}" --exit-status   # waits; non-zero unless every job passed
+```
