@@ -402,6 +402,35 @@ describe("Sandbox.exec via fake shell", () => {
     }
   });
 
+  it("retries exec once with a fresh shell token when the connection is refused", async () => {
+    let handshakes = 0;
+    const wss = new WebSocketServer({
+      port: 0,
+      verifyClient: (_info, cb) => {
+        handshakes += 1;
+        if (handshakes === 1) cb(false, 403);
+        else cb(true);
+      },
+    });
+    wss.on("connection", (ws) => {
+      ws.on("message", (data: Buffer) => {
+        const m = /__SUNABA_DONE_([a-z0-9]+)_%d__/.exec(data.toString());
+        if (m) ws.send(`ok\n__SUNABA_DONE_${m[1]}_0__\n`);
+      });
+    });
+    const port = (wss.address() as AddressInfo).port;
+    try {
+      const client = makeClient();
+      const sbx = await Sandbox.create({ image: ARN, client, region: "us-east-1" });
+      const res = await sbx.exec("true", { urlOverride: `ws://127.0.0.1:${port}` });
+      expect(res.output).toBe("ok");
+      expect(handshakes).toBe(2);
+      expect(client.callsOf("CreateMicrovmShellAuthTokenCommand")).toHaveLength(2);
+    } finally {
+      wss.close();
+    }
+  });
+
   it("readFile chunks large files via dd (no silent truncation)", async () => {
     const wss = new WebSocketServer({ port: 0 });
     wss.on("connection", (ws) => {

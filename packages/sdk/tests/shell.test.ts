@@ -1,6 +1,7 @@
-import type { AddressInfo } from "node:net";
+import { type AddressInfo, createServer, type Server, type Socket } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
+import { TimeoutError } from "../src/errors.js";
 import { execOverShell, microvmSubprotocols } from "../src/shell.js";
 
 /** Fake PTY end: extracts the nonce from the marker in the payload and answers. */
@@ -163,7 +164,47 @@ describe("execOverShell", () => {
         command: "sleep 60",
         timeoutMs: 5_000,
       }),
-    ).rejects.toThrow(/closed/i);
+    ).rejects.toMatchObject({ code: "ShellClosed" });
+  });
+
+  it("rejects with TimeoutError when the command never finishes", async () => {
+    wss = new WebSocketServer({ port: 0 }); // accepts input, never answers
+    const p = port(wss);
+    const err = await execOverShell({
+      endpoint: `127.0.0.1:${p}`,
+      url: `ws://127.0.0.1:${p}`,
+      token: "tok",
+      command: "sleep 60",
+      timeoutMs: 200,
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err).toMatchObject({ code: "Timeout" });
+  });
+
+  it("prefixes the command with a quoted cd when cwd is set", async () => {
+    let script = "";
+    wss = new WebSocketServer({ port: 0 });
+    wss.on("connection", (ws) => {
+      let buf = "";
+      ws.on("message", (data: Buffer) => {
+        buf += data.toString();
+        const m = /__SUNABA_DONE_([a-z0-9]+)_%d__/.exec(buf);
+        if (!m) return;
+        const b64 = /printf %s '([A-Za-z0-9+/=\n]+)' \| base64 -d/.exec(buf)?.[1] ?? "";
+        script = Buffer.from(b64.replace(/\s/g, ""), "base64").toString();
+        ws.send(`__SUNABA_DONE_${m[1]}_0__\n`);
+      });
+    });
+    const p = port(wss);
+    await execOverShell({
+      endpoint: `127.0.0.1:${p}`,
+      url: `ws://127.0.0.1:${p}`,
+      token: "tok",
+      command: "ls",
+      cwd: "/srv/it's here",
+      timeoutMs: 5_000,
+    });
+    expect(script).toBe("cd '/srv/it'\\''s here' && ls");
   });
 
   it("caps retained output in UTF-8 bytes and keeps the tail", async () => {
@@ -204,5 +245,30 @@ describe("execOverShell", () => {
       timeoutMs: 5_000,
     });
     expect(res.output).toBe("日本語");
+  });
+});
+
+describe("execOverShell connection failures", () => {
+  let tcp: Server | undefined;
+  const sockets: Socket[] = [];
+  afterEach(() => {
+    for (const s of sockets) s.destroy();
+    tcp?.close();
+  });
+
+  it("reports a connect timeout as ShellConnectFailed, so Sandbox.exec may retry it", async () => {
+    // Accepts TCP but never answers the WebSocket upgrade.
+    tcp = createServer((s) => sockets.push(s));
+    await new Promise<void>((r) => tcp?.listen(0, "127.0.0.1", r));
+    const p = (tcp.address() as AddressInfo).port;
+    const err = await execOverShell({
+      endpoint: `127.0.0.1:${p}`,
+      url: `ws://127.0.0.1:${p}`,
+      token: "tok",
+      command: "true",
+      connectTimeoutMs: 100,
+    }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: "ShellConnectFailed" });
+    expect((err as { cause?: unknown }).cause).toBeInstanceOf(TimeoutError);
   });
 });
