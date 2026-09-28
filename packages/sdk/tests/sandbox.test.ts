@@ -375,6 +375,33 @@ describe("Sandbox.exec via fake shell", () => {
     }
   });
 
+  it("readFile feeds the path to base64 on stdin, so a leading '-' is not an option", async () => {
+    const cmds: string[] = [];
+    const wss = new WebSocketServer({ port: 0 });
+    wss.on("connection", (ws) => {
+      let buf = "";
+      ws.on("message", (data: Buffer) => {
+        buf += data.toString();
+        const m = /__SUNABA_DONE_([a-z0-9]+)_%d__/.exec(buf);
+        if (!m) return;
+        const cmd = decodeCmd(buf);
+        buf = "";
+        cmds.push(cmd);
+        const out = cmd.startsWith("wc -c") ? "2\n" : "aGk=\n";
+        ws.send(`${out}__SUNABA_DONE_${m[1]}_0__\n`);
+      });
+    });
+    const port = (wss.address() as AddressInfo).port;
+    try {
+      const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+      const back = await sbx.readFile("-data.bin", { urlOverride: `ws://127.0.0.1:${port}` });
+      expect(back.toString()).toBe("hi");
+      expect(cmds).toEqual(["wc -c < '-data.bin'", "base64 < '-data.bin'"]);
+    } finally {
+      wss.close();
+    }
+  });
+
   it("readFile chunks large files via dd (no silent truncation)", async () => {
     const wss = new WebSocketServer({ port: 0 });
     wss.on("connection", (ws) => {

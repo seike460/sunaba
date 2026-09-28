@@ -438,7 +438,7 @@ export class Sandbox {
     }
     const decode = (output: string) => Buffer.from(output.replace(/\s+/g, ""), "base64");
     if (size <= chunkBytes) {
-      const r = await this.exec(`base64 ${shellQuote(path)}`, { timeoutMs: 60_000, ...opts });
+      const r = await this.exec(`base64 < ${shellQuote(path)}`, { timeoutMs: 60_000, ...opts });
       if (r.exitCode !== 0) {
         throw new SunabaError("ReadFailed", `read ${path} failed: ${r.output}`);
       }
