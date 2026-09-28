@@ -35,6 +35,17 @@ function makeClient(overrides: Record<string, unknown> = {}) {
   });
 }
 
+/** makeClient, but every endpoint token mint returns a new token. */
+function mintingClient() {
+  const base = makeClient();
+  let mints = 0;
+  return new FakeMicrovmsClient((cmd: any) =>
+    cmd.constructor.name === "CreateMicrovmAuthTokenCommand"
+      ? { authToken: { "X-aws-proxy-auth": `TOK-${++mints}` } }
+      : base.send(cmd),
+  );
+}
+
 describe("Sandbox.create", () => {
   it("resolves image name, runs, and waits for RUNNING", async () => {
     const client = makeClient();
@@ -67,10 +78,13 @@ describe("Sandbox.create", () => {
 });
 
 describe("Sandbox.request", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 
-  it("sends auth + port headers and retries once on 403", async () => {
-    const client = makeClient();
+  it("sends auth + port headers and retries once on 403 with a fresh token", async () => {
+    const client = mintingClient();
     const sbx = await Sandbox.create({ image: ARN, client, region: "us-east-1" });
 
     const seen: Record<string, string>[] = [];
@@ -85,8 +99,71 @@ describe("Sandbox.request", () => {
     const res = await sbx.request("/health", { port: 9000 });
     expect(res.status).toBe(200);
     expect(calls).toBe(2);
-    expect(seen[0]?.["x-aws-proxy-port"]).toBe("9000");
-    expect(seen[0]?.["x-aws-proxy-auth"]).toBe("TOK");
+    expect(seen.map((h) => h["x-aws-proxy-auth"])).toEqual(["TOK-1", "TOK-2"]);
+    expect(seen.map((h) => h["x-aws-proxy-port"])).toEqual(["9000", "9000"]);
+    expect(client.callsOf("CreateMicrovmAuthTokenCommand")).toHaveLength(2);
+  });
+
+  it("drops a rejected token even when the request itself is not retried", async () => {
+    const sbx = await Sandbox.create({ image: ARN, client: mintingClient(), region: "us-east-1" });
+    const tokens: (string | null)[] = [];
+    vi.stubGlobal("fetch", async (_url: string | URL, init?: RequestInit) => {
+      tokens.push(new Headers(init?.headers).get("x-aws-proxy-auth"));
+      return new Response(null, { status: tokens.length === 1 ? 403 : 200 });
+    });
+    expect((await sbx.request("/jobs", { method: "POST", body: "{}" })).status).toBe(403);
+    expect((await sbx.request("/health")).status).toBe(200);
+    expect(tokens).toEqual(["TOK-1", "TOK-2"]);
+  });
+
+  it("retries a POST on 5xx when the caller opts in with retry: true", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return new Response(null, { status: calls === 1 ? 503 : 200 });
+    });
+    const pending = sbx.request("/jobs", { method: "POST", body: "{}", retry: true });
+    await vi.advanceTimersByTimeAsync(250);
+    expect((await pending).status).toBe(200);
+    expect(calls).toBe(2);
+  });
+
+  it("never retries a ReadableStream body, even for an idempotent PUT", async () => {
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return new Response(null, { status: 500 });
+    });
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode("data"));
+        c.close();
+      },
+    });
+    expect((await sbx.request("/blob", { method: "PUT", body })).status).toBe(500);
+    expect(calls).toBe(1);
+  });
+
+  it("waits for Retry-After before retrying a 429", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response(null, { status: 429, headers: { "retry-after": "2" } })
+        : new Response("ok");
+    });
+    const pending = sbx.request("/health");
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(calls).toBe(1);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await pending).status).toBe(200);
+    expect(calls).toBe(2);
   });
 
   it("never auto-retries a non-idempotent POST (lost-response double-execute)", async () => {
@@ -424,6 +501,29 @@ describe("Sandbox.exec via fake shell", () => {
       const sbx = await Sandbox.create({ image: ARN, client, region: "us-east-1" });
       const res = await sbx.exec("true", { urlOverride: `ws://127.0.0.1:${port}` });
       expect(res.output).toBe("ok");
+      expect(handshakes).toBe(2);
+      expect(client.callsOf("CreateMicrovmShellAuthTokenCommand")).toHaveLength(2);
+    } finally {
+      wss.close();
+    }
+  });
+
+  it("retries interactiveShell once with a fresh shell token, then gives up", async () => {
+    let handshakes = 0;
+    const wss = new WebSocketServer({
+      port: 0,
+      verifyClient: (_info, cb) => {
+        handshakes += 1;
+        cb(false, 403);
+      },
+    });
+    const port = (wss.address() as AddressInfo).port;
+    try {
+      const client = makeClient();
+      const sbx = await Sandbox.create({ image: ARN, client, region: "us-east-1" });
+      await expect(
+        sbx.interactiveShell({ urlOverride: `ws://127.0.0.1:${port}` }),
+      ).rejects.toMatchObject({ code: "ShellConnectFailed" });
       expect(handshakes).toBe(2);
       expect(client.callsOf("CreateMicrovmShellAuthTokenCommand")).toHaveLength(2);
     } finally {
