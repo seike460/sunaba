@@ -64,7 +64,7 @@ function assertNoIamWildcard(key: string): void {
 
 /**
  * Code artifact source for {@link MicrovmImage}. Use
- * `MicrovmImageSource.fromDirectory()` for local code (uploaded via the CDK
+ * `MicrovmImageSources.fromDirectory()` for local code (uploaded via the CDK
  * bootstrap bucket), `fromS3Uri()`/`fromBucket()` for artifacts already in S3.
  */
 export const MicrovmImageSources = {
@@ -118,9 +118,11 @@ export const MicrovmImageSources = {
    * The directory is zipped and uploaded to the CDK bootstrap S3 bucket at
    * deploy time (like `lambda.Code.fromAsset`).
    *
-   * `options.exclude` are .gitignore-style patterns REPLACING the safe
-   * defaults ({@link DEFAULT_EXCLUDE_PATTERNS}), which keep secrets like
-   * `.env` and private keys out of the uploaded artifact.
+   * By default, VCS metadata, `node_modules`, `.env*` files, private keys and
+   * credential files (`.aws/`, `.ssh/`, `.npmrc`, `*.tfstate*`, ...) are left
+   * out of the uploaded artifact. `options.exclude` (.gitignore-style
+   * patterns) REPLACES that whole list rather than adding to it — an explicit
+   * list must exclude those secrets itself.
    */
   fromDirectory(path: string, options?: { exclude?: string[] }): MicrovmImageSource {
     const exclude = options?.exclude ?? [...DEFAULT_EXCLUDE_PATTERNS];
@@ -140,7 +142,7 @@ export const MicrovmImageSources = {
  * Default exclusion patterns for `MicrovmImageSources.fromDirectory` —
  * keeps credentials and VCS metadata out of the build artifact.
  */
-export const DEFAULT_EXCLUDE_PATTERNS: readonly string[] = [
+const DEFAULT_EXCLUDE_PATTERNS: readonly string[] = [
   // VCS / dependency noise.
   ".git",
   "**/.git",
