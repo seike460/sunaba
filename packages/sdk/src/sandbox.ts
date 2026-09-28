@@ -403,7 +403,7 @@ export class Sandbox {
 
   /** Write a file inside the MicroVM (base64 over shell). */
   async writeFile(path: string, data: string | Uint8Array, opts: ExecOptions = {}): Promise<void> {
-    const b64 = Buffer.from(data as string | Uint8Array).toString("base64");
+    const b64 = Buffer.from(data).toString("base64");
     const r = await this.exec(`printf %s '${b64}' | base64 -d > ${shellQuote(path)}`, {
       timeoutMs: 60_000,
       ...opts,
