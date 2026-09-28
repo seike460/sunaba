@@ -48,6 +48,15 @@ describe("MicrovmExecutionRole", () => {
 });
 
 describe("MicrovmBuildRole", () => {
+  it("grants no ECR permissions by default", () => {
+    const app = new App();
+    const stack = new Stack(app, "T");
+    new MicrovmBuildRole(stack, "Role");
+    const template = Template.fromStack(stack);
+    template.resourceCountIs("AWS::IAM::Policy", 1);
+    expect(JSON.stringify(template.toJSON())).not.toContain("ecr:");
+  });
+
   it("optionally grants private ECR pull permissions", () => {
     const app = new App();
     const stack = new Stack(app, "T");

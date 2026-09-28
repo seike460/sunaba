@@ -513,5 +513,18 @@ describe("MicrovmImage", () => {
     expect(
       () => new MicrovmImage(stack, "I6", { source: src, egressConnectors: ["bad name"] }),
     ).toThrow(/managed connector/);
+    expect(
+      () =>
+        new MicrovmImage(stack, "I7", {
+          source: src,
+          architecture: "X86_64" as ImageProps["architecture"],
+        }),
+    ).toThrow(/architecture/);
+    expect(() => new MicrovmImage(stack, "I8", { source: src, baseImageVersion: "1 2" })).toThrow(
+      /baseImageVersion/,
+    );
+    expect(() => new MicrovmImage(stack, "I9", { source: src, description: " " })).toThrow(
+      /description/,
+    );
   });
 });
