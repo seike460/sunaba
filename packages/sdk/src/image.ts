@@ -151,6 +151,11 @@ async function resolveArtifactUri(
  * Entries that must never be baked into a MicroVM image (secrets).
  * Each RegExp is tested against a single path segment: every walked
  * entry's name, and every segment of a symlink's resolved target.
+ *
+ * The secret entries mirror sunaba-cdk's DEFAULT_EXCLUDE_PATTERNS; keep
+ * them in sync. The lists still differ: most entries here ignore case
+ * (the CDK globs do not), and only this list drops .dockerignore,
+ * .gitignore and .gitmodules, which are not secrets.
  */
 const SECRET_DENYLIST: RegExp[] = [
   /^\.env(\..*)?$/i,
@@ -181,8 +186,7 @@ const SECRET_DENYLIST: RegExp[] = [
   // Terraform state carries plaintext secrets — including backups
   // (terraform.tfstate.backup, .tfstate~).
   /\.tfstate/i,
-  // PuTTY private keys. Keep in sync with sunaba-cdk's
-  // DEFAULT_EXCLUDE_PATTERNS — both lists are the same secret barrier.
+  // PuTTY private keys.
   /\.ppk$/i,
   // Not a secret — a zip-safety exclusion: fflate's fltn() writes entries
   // into a plain {} where "__proto__" hits the prototype setter, which

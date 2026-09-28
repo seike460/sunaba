@@ -68,7 +68,10 @@ class TokenCache {
   }
 }
 
-/** The service caps token lifetime at 60 minutes. */
+/**
+ * The service caps endpoint token lifetime at 60 minutes. Shell tokens
+ * document no maximum and share the same bound.
+ */
 function checkTtlMinutes(minutes: number, what: string): void {
   if (!Number.isInteger(minutes) || minutes < 1 || minutes > 60) {
     throw new SunabaError("BadTokenTtl", `${what} must be an integer 1-60`);
@@ -122,7 +125,7 @@ export class AuthTokenManager {
 
 /**
  * Mints tokens for the SHELL_INGRESS WebSocket shell.
- * Shell tokens have their own API and a shorter maximum lifetime.
+ * Shell tokens have their own API and carry no port scope.
  */
 export class ShellTokenManager {
   private readonly cache: TokenCache;
