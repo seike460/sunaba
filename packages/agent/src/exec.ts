@@ -40,18 +40,20 @@ const DRAIN_GRACE_MS = 2_000;
 /** Live children so close()/shutdown can reap them instead of orphaning. */
 const liveChildren = new Set<ChildProcess>();
 
-export function killAllExecs(): void {
-  for (const child of liveChildren) {
+function killProcessTree(child: ChildProcess): void {
+  try {
+    if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+  } catch {
     try {
-      if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+      child.kill("SIGKILL");
     } catch {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // already gone
-      }
+      // already gone
     }
   }
+}
+
+export function killAllExecs(): void {
+  for (const child of liveChildren) killProcessTree(child);
 }
 
 export async function runExec(req: ExecRequest): Promise<ExecResult> {
@@ -146,21 +148,9 @@ export async function runExec(req: ExecRequest): Promise<ExecResult> {
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      killTree();
+      killProcessTree(child);
     }, timeoutMs);
     timer.unref();
-
-    function killTree() {
-      try {
-        if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
-      } catch {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          // already gone
-        }
-      }
-    }
 
     let exitCode: number | null | undefined;
     let exitSignal: string | undefined;

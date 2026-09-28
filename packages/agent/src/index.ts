@@ -42,10 +42,7 @@ export function startAgent(opts: AgentOptions = {}): AgentServers {
     onError: opts.onError,
     routes: {
       "GET /healthz": async () => ({ ok: true }),
-      "POST /exec": async (body) => {
-        const result = await runExec(body as unknown as ExecRequest);
-        return result;
-      },
+      "POST /exec": (body) => runExec(body as unknown as ExecRequest),
       ...fsRoutes,
     },
   });

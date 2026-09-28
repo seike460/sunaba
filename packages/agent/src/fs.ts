@@ -33,13 +33,7 @@ function direntType(e: {
 async function statResult(p: string) {
   const s = await fsp.lstat(p);
   return {
-    type: s.isSymbolicLink()
-      ? "symlink"
-      : s.isDirectory()
-        ? "directory"
-        : s.isFile()
-          ? "file"
-          : "other",
+    type: direntType(s),
     size: s.size,
     mode: s.mode & 0o7777,
     mtimeMs: s.mtimeMs,

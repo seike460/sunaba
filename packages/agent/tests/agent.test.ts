@@ -352,6 +352,14 @@ describe("hooks server", () => {
     }
   });
 
+  it("rejects hook bodies over 1 MiB with 413 BodyTooLarge", async () => {
+    const res = await post(hooksPort, "/aws/lambda-microvms/runtime/v1/ready", {
+      pad: "x".repeat(1_048_576),
+    });
+    expect(res.status).toBe(413);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("BodyTooLarge");
+  });
+
   it("404s outside the hook prefix", async () => {
     const res = await post(hooksPort, "/nope", {});
     expect(res.status).toBe(404);

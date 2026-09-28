@@ -23,11 +23,9 @@ const HTTP_ERROR_CODES: Record<number, string> = {
   503: "ServiceUnavailable",
 };
 
-export class BodyTooLarge extends Error {}
-
 const BODY_LIMIT = 32 * 1024 * 1024; // fs payloads can be large files
 
-export async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
+async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   let exceeded = false;
@@ -38,7 +36,7 @@ export async function readJsonBody(req: IncomingMessage, maxBytes: number): Prom
     if (size > maxBytes) exceeded = true;
     else if (!exceeded) chunks.push(c as Buffer);
   }
-  if (exceeded) throw new BodyTooLarge("request body exceeds limit");
+  if (exceeded) throw new HttpError(413, "request body exceeds limit");
   const text = Buffer.concat(chunks).toString("utf8");
   if (!text) return {};
   try {
@@ -48,7 +46,7 @@ export async function readJsonBody(req: IncomingMessage, maxBytes: number): Prom
   }
 }
 
-export function sendJson(res: ServerResponse, status: number, body: unknown): void {
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, { "content-type": "application/json" }).end(payload);
 }
@@ -70,15 +68,11 @@ const ERRNO_STATUS: Record<string, number> = {
   EPERM: 403,
 };
 
-export function sendError(res: ServerResponse, err: unknown): void {
+function sendError(res: ServerResponse, err: unknown): void {
   // The socket may already be dead (client abort, request timeout) — writing
   // would throw inside the catch path and crash the process.
   if (res.destroyed || res.writableEnded) return;
   try {
-    if (err instanceof BodyTooLarge) {
-      sendJson(res, 413, { error: { code: "BodyTooLarge", message: err.message } });
-      return;
-    }
     if (err instanceof HttpError) {
       sendJson(res, err.status, { error: { code: err.code, message: err.message } });
       return;
