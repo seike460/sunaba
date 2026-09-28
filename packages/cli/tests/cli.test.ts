@@ -209,6 +209,7 @@ describe("init", () => {
     expect(dockerfile).toContain("sunaba-agent");
     expect(dockerfile).not.toMatch(/^RUN npm install -g sunaba-agent$/m);
     expect(dockerfile).not.toContain("COPY sunaba-agent/");
+    expect(dockerfile).toMatch(/^#\s+RUN npm install -g sunaba-agent$/m);
     // Installing the agent without starting it serves nothing — the
     // commented recipe must include the command that runs it.
     expect(dockerfile).toMatch(/^#\s+CMD \["sunaba-agentd"\]$/m);
@@ -275,22 +276,24 @@ describe("build", () => {
     expect(lines[0]).toContain(`built ${ARN}`);
   });
 
-  it("takes name/role/bucket from sunaba.json", async () => {
+  it("takes name/role from sunaba.json", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "sunaba-cli-"));
-    writeConfig(
-      {
+    try {
+      writeConfig(
+        { name: "cfg-name", sourceDir: ".", buildRoleArn: "arn:aws:iam::123456789012:role/r" },
+        dir,
+      );
+      const { client, context } = ctx([], { cwd: dir });
+      // --s3-uri bypasses the S3 upload path, so no artifact bucket is used.
+      const code = await cmdBuild(parseArgs(["--s3-uri", "s3://bkt/app.zip"]), context);
+      expect(code).toBe(0);
+      expect(client.callsOf("CreateMicrovmImageCommand")[0]?.input).toMatchObject({
         name: "cfg-name",
-        sourceDir: ".",
         buildRoleArn: "arn:aws:iam::123456789012:role/r",
-        artifactBucket: "bkt",
-      },
-      dir,
-    );
-    const { context } = ctx([], { cwd: dir });
-    // --s3-uri bypasses the S3 upload path which needs a real bucket.
-    const code = await cmdBuild(parseArgs(["--s3-uri", "s3://bkt/app.zip"]), context);
-    expect(code).toBe(0);
-    rmSync(dir, { recursive: true, force: true });
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("rejects missing role", async () => {
@@ -531,13 +534,6 @@ describe("run", () => {
       /requires a value/,
     );
     expect(client.callsOf("RunMicrovmCommand")).toHaveLength(0);
-  });
-
-  it("suspend/resume accept --timeout to extend the state wait", async () => {
-    const { client, context } = ctx();
-    const code = await cmdSuspend(parseArgs(["m-1", "--timeout", "5000"]), context);
-    expect(code).toBe(0);
-    expect(client.callsOf("SuspendMicrovmCommand")).toHaveLength(1);
   });
 
   it("rejects --exec together with a -- command", async () => {
@@ -1215,7 +1211,44 @@ describe("lifecycle", () => {
   it("rm waits out SUSPENDING before terminating", async () => {
     const { client, context } = ctx([], {}, "SUSPENDING");
     expect(await cmdRm(parseArgs(["m-1"]), context)).toBe(0);
-    expect(client.callsOf("TerminateMicrovmCommand")).toHaveLength(1);
+    // The fake reports SUSPENDING once: Terminate must follow the poll
+    // that saw SUSPENDED, not the first read.
+    expect(
+      client.calls.map((c) => (c as { constructor: { name: string } }).constructor.name),
+    ).toEqual(["GetMicrovmCommand", "GetMicrovmCommand", "TerminateMicrovmCommand"]);
+  });
+
+  it("suspend/resume pass --timeout to the state wait", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const [cmd, verb, state] of [
+        [cmdSuspend, "suspend", "RUNNING"],
+        [cmdResume, "resume", "SUSPENDED"],
+      ] as const) {
+        // Accepts the call but never leaves its state — only the wait's
+        // timeout ends the command.
+        const stuck = {
+          async send(c: unknown) {
+            const n = (c as { constructor: { name: string } }).constructor.name;
+            return n === "GetMicrovmCommand" ? { microvmId: "m-1", state } : {};
+          },
+        };
+        const errs: string[] = [];
+        const run = cmd(parseArgs(["m-1", "--timeout", "1000"]), {
+          client: stuck as never,
+          region: "us-east-1",
+          out: () => {},
+          err: (l) => errs.push(l),
+        });
+        await runTimersUntilSettled(run);
+        expect(await run).toBe(1);
+        expect(errs).toEqual([
+          `warning: could not ${verb} m-1: timed out after 1000ms waiting for condition`,
+        ]);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rm retries terminate on Conflict while stuck PENDING (no RUNNING wait)", async () => {
