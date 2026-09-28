@@ -149,7 +149,8 @@ async function resolveArtifactUri(
 
 /**
  * Entries that must never be baked into a MicroVM image (secrets).
- * Matched against the file's basename; `*` matches a suffix/prefix.
+ * Each RegExp is tested against a single path segment: every walked
+ * entry's name, and every segment of a symlink's resolved target.
  */
 const SECRET_DENYLIST: RegExp[] = [
   /^\.env(\..*)?$/i,

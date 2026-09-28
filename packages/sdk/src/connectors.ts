@@ -61,8 +61,9 @@ export function isManagedConnectorName(value: string): boolean {
 
 /**
  * Resolves a connector reference to an ARN. Managed connector names
- * (ALL_INGRESS, NO_INGRESS, SHELL_INGRESS, INTERNET_EGRESS) are expanded
- * to their regional managed ARN; full ARNs pass through unchanged.
+ * (HTTP_INGRESS, SHELL_INGRESS, ALL_INGRESS, NO_INGRESS, INTERNET_EGRESS)
+ * are expanded to their regional managed ARN; full ARNs pass through
+ * unchanged.
  */
 export function connectorArn(ref: string, region?: string): string {
   if (ref.startsWith("arn:")) return ref;
