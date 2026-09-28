@@ -13,8 +13,7 @@ top that every application ends up needing:
 | WebSocket PTY handshake (`create-microvm-shell-auth-token` + subprotocols) | `Sandbox.exec()` / `interactiveShell()` — agent-free commands over `SHELL_INGRESS` |
 | suspend/resume waits, reconnects | `Sandbox.suspend()/resume()/connect()` — state-aware, auto-resume |
 | image build pipeline (zip → S3 → create → SUCCESSFUL poll) | `buildMicrovmImage()` + `sunaba build` |
-| CloudFormation only models the image | `sunaba-cdk` L2 constructs for image, network connectors, IAM roles |
-| no high-level TypeScript SDK at all | `sunaba-sdk` — the missing one |
+| CloudFormation has only L1 resources (`AWS::Lambda::MicrovmImage`, `AWS::Lambda::NetworkConnector`) | `sunaba-cdk` L2 constructs for image, network connectors, IAM roles |
 
 ## Packages
 
@@ -160,11 +159,15 @@ the image. To serve the lifecycle hooks from your own app instead, use
 {
   "name": "demo",
   "sourceDir": ".",
+  "baseImage": "al2023-1",
   "artifactBucket": "my-artifacts-bucket",
   "buildRoleArn": "arn:aws:iam::123456789012:role/microvm-build",
   "executionRoleArn": "arn:aws:iam::123456789012:role/microvm-exec"
 }
 ```
+
+`baseImage` takes a managed base image name or a full image ARN;
+`sunaba build --base-image` overrides it.
 
 Global flags: `--region`, `--profile`. `--json` is per-command
 (`run`, `exec`, `ls`, `images`, `status`). Region precedence:
