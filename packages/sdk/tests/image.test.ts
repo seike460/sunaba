@@ -41,14 +41,60 @@ describe("zipDirectory", () => {
     expect(Object.keys(unzipSync(zip)).sort()).toEqual(["Dockerfile", "app.js"]);
   });
 
-  it("excludes secret-looking files", async () => {
-    tmp = mkdtempSync(path.join(tmpdir(), "sunaba-"));
-    writeFileSync(path.join(tmp, "Dockerfile"), "FROM scratch\n");
-    writeFileSync(path.join(tmp, ".env"), "SECRET=1\n");
-    writeFileSync(path.join(tmp, "id_rsa"), "KEY\n");
-    writeFileSync(path.join(tmp, "cert.pem"), "PEM\n");
-    const zip = await zipDirectory(tmp);
-    expect(Object.keys(unzipSync(zip)).sort()).toEqual(["Dockerfile"]);
+  it("keeps secrets and noise out of the zip, at any depth", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "sunaba-"));
+    tmp = dir;
+    const put = (rel: string, body = "x\n") => {
+      mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+      writeFileSync(path.join(dir, rel), body);
+    };
+    put("Dockerfile", "FROM scratch\n");
+    put("app.js");
+    put("sub/keep.js");
+    // Same fixture as sunaba-cdk's DEFAULT_EXCLUDE_PATTERNS test…
+    for (const secret of [
+      ".env",
+      "id_rsa",
+      "cert.pem",
+      ".npmrc",
+      ".pypirc",
+      "prod.tfstate",
+      "store.jks",
+      ".ssh/id_ed25519",
+      ".aws/credentials",
+      "node_modules/x.js",
+      ".git/config",
+      "sub/.env",
+      "sub/node_modules/y.js",
+      "sub/.ssh/id_ed25519",
+      "sub/.env.local",
+      "sub/credentials",
+      // …plus the rest of the denylist, nested and top-level.
+      ".envrc",
+      ".netrc",
+      ".pgpass",
+      ".git-credentials",
+      "tls.key",
+      "client.p12",
+      "client.pfx",
+      "app.keystore",
+      "putty.ppk",
+      "id_dsa",
+      "id_ecdsa",
+      "terraform.tfstate.backup",
+      ".gnupg/pubring.kbx",
+      ".kube/config",
+      ".docker/config.json",
+      ".terraform/terraform.tfstate",
+      "sub/.aws/config",
+      "sub/.npmrc",
+      "sub/deep/id_rsa.pub",
+      "sub/deep/.ENV.production",
+    ]) {
+      put(secret);
+    }
+    const zip = await zipDirectory(dir);
+    expect(Object.keys(unzipSync(zip)).sort()).toEqual(["Dockerfile", "app.js", "sub/keep.js"]);
   });
 
   it("rejects symlinks escaping the source dir", async () => {
