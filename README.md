@@ -97,6 +97,8 @@ const res = await sb.request("/exec", {
   port: 8080,
   body: JSON.stringify({ command: "uname -a" }),
 });
+const { exitCode, stdout } = (await res.json()) as { exitCode: number | null; stdout: string };
+console.log(Buffer.from(stdout, "base64").toString(), exitCode); // stdout/stderr are base64
 ```
 
 The endpoint token behind `request()` and `websocket()` covers every port
@@ -140,7 +142,8 @@ const execRole = new MicrovmExecutionRole(this, "ExecRole");
 
 `sunaba-agent` runs **inside** the MicroVM and exposes a JSON POST API:
 
-- `POST /exec` — run a command, get stdout/stderr/exit code
+- `POST /exec` — run a command, get `exitCode` and base64-encoded
+  `stdout`/`stderr` (default `timeoutMs`: 30 s)
 - `POST /fs/{read,write,list,stat,mkdir,remove,rename,copy}` — filesystem ops
 - lifecycle hooks (`SUNABA_HOOK_*` env → shell commands) on `:9000`
 
