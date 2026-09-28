@@ -4,13 +4,14 @@ import {
   type MicrovmImageVersionState,
   type MicrovmState,
 } from "@aws-sdk/client-lambda-microvms";
-import { StateError, TimeoutError } from "./errors.js";
+import { StateError, SunabaError, TimeoutError } from "./errors.js";
 import type { LambdaMicrovmsClientLike } from "./types.js";
 import { isNotFoundError, sleep } from "./util.js";
 
 export interface WaitOptions {
   timeoutMs?: number;
   intervalMs?: number;
+  /** Stops the wait with a SunabaError whose code is "Aborted". */
   signal?: AbortSignal;
 }
 
@@ -24,14 +25,14 @@ async function poll<T>(
   const deadline = Date.now() + timeout;
   for (;;) {
     if (opts.signal?.aborted) {
-      throw new TimeoutError("wait aborted");
+      throw new SunabaError("Aborted", "wait aborted", opts.signal.reason);
     }
     const value = await fn();
     if (done(value)) return value;
     if (Date.now() > deadline) {
       throw new TimeoutError(`timed out after ${timeout}ms waiting for condition`);
     }
-    await sleep(Math.min(interval, Math.max(50, deadline - Date.now())));
+    await sleep(Math.min(interval, Math.max(50, deadline - Date.now())), opts.signal);
   }
 }
 

@@ -1,7 +1,11 @@
-import { describe, expect, it } from "vitest";
-import { StateError } from "../src/errors.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { StateError, TimeoutError } from "../src/errors.js";
 import { waitForImageVersion, waitForMicrovmState } from "../src/waiters.js";
 import { FakeMicrovmsClient } from "./helpers.js";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("waitForMicrovmState", () => {
   it("resolves when the target state is reached", async () => {
@@ -41,6 +45,35 @@ describe("waitForMicrovmState", () => {
       timeoutMs: 5_000,
     });
     expect(info.state).toBe("TERMINATED");
+  });
+
+  it("stops with an Aborted error, not a TimeoutError, when already aborted", async () => {
+    const client = new FakeMicrovmsClient(() => ({ microvmId: "mvm-1", state: "PENDING" }));
+    const ac = new AbortController();
+    const reason = new Error("caller gave up");
+    ac.abort(reason);
+    const err = await waitForMicrovmState(client, "mvm-1", "RUNNING", {
+      signal: ac.signal,
+    }).catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(TimeoutError);
+    expect(err).toMatchObject({ code: "Aborted", cause: reason });
+    expect(client.calls).toHaveLength(0);
+  });
+
+  it("aborts during the sleep between polls instead of waiting it out", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const client = new FakeMicrovmsClient(() => ({ microvmId: "mvm-1", state: "PENDING" }));
+    const ac = new AbortController();
+    const waiting = waitForMicrovmState(client, "mvm-1", "RUNNING", {
+      intervalMs: 60_000,
+      signal: ac.signal,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(1); // the first poll is done; now sleeping
+    ac.abort();
+    await expect(waiting).rejects.toMatchObject({ code: "Aborted" });
+    expect(client.calls).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("accepts TERMINATED when the target is TERMINATING", async () => {

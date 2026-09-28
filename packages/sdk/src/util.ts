@@ -3,7 +3,19 @@ import { SunabaError } from "./errors.js";
 /** Default cap for retained shell (PTY) output, which merges stdout and stderr. */
 export const DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 
-export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** Resolve after `ms`, or as soon as `signal` aborts (the caller checks it). */
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
 
 /** Throw BadResponse when a required response field is absent. */
 export function required<T>(v: T | undefined | null, name: string): T {
