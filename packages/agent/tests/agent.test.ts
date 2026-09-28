@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { once } from "node:events";
 import {
   chmodSync,
   linkSync,
@@ -7,12 +8,15 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
-import type { Server } from "node:http";
+import type { IncomingMessage, Server } from "node:http";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { type AgentServers, envHookHandlers, startAgent } from "../src/index.js";
 
 let servers: AgentServers;
@@ -277,6 +281,28 @@ describe("fs API", () => {
     );
   });
 
+  it("does not write or copy through a symlink", async () => {
+    const target = path.join(dir, "symlink-target.txt");
+    const link = path.join(dir, "symlink.txt");
+    writeFileSync(target, "original");
+    symlinkSync(target, link);
+    const write = await post(apiPort, "/fs/write", { path: link, data: "new", encoding: "utf8" });
+    expect(write.status).toBe(400);
+    expect(((await write.json()) as { error: { code: string } }).error.code).toBe("ELOOP");
+
+    const src = path.join(dir, "symlink-src.txt");
+    writeFileSync(src, "new");
+    expect((await post(apiPort, "/fs/copy", { from: src, to: link })).status).toBe(400);
+    expect(readFileSync(target, "utf8")).toBe("original");
+  });
+
+  it("refuses reads over the 64 MiB cap with 413", async () => {
+    const big = path.join(dir, "big.bin");
+    writeFileSync(big, "");
+    truncateSync(big, 64 * 1024 * 1024 + 1);
+    expect((await post(apiPort, "/fs/read", { path: big })).status).toBe(413);
+  });
+
   it("404s on missing files and 400s on missing args", async () => {
     expect((await post(apiPort, "/fs/read", { path: path.join(dir, "nope") })).status).toBe(404);
     expect((await post(apiPort, "/fs/read", {})).status).toBe(400);
@@ -440,5 +466,32 @@ describe("agent wiring", () => {
     await s.close();
     expect(Date.now() - start).toBeLessThan(5_000);
     await inflight; // must settle — resolved or fetch-aborted
+  });
+  it("drops a request whose body stalls for 60 s", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const sock = connect(apiPort, "127.0.0.1");
+    try {
+      const reply = new Promise<string>((resolve) => {
+        let data = "";
+        sock.on("data", (c) => {
+          data += c;
+        });
+        sock.on("error", () => {});
+        sock.on("close", () => resolve(data));
+      });
+      // The handler arms the body timer synchronously, before this listener runs.
+      const request = once(servers.api, "request") as Promise<[IncomingMessage]>;
+      sock.write("POST /exec HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\n{");
+      const [req] = await request;
+      vi.advanceTimersByTime(59_999);
+      expect(req.destroyed).toBe(false);
+      vi.advanceTimersByTime(1);
+      expect(req.destroyed).toBe(true);
+      // req.destroy() drops the socket before the 408 is written.
+      expect(await reply).toBe("");
+    } finally {
+      vi.useRealTimers();
+      sock.destroy();
+    }
   });
 });
