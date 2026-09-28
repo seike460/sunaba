@@ -37,7 +37,7 @@ top that every application ends up needing:
 ## Quick start
 
 ```bash
-npm install -g sunaba-cli        # once published; locally: node packages/cli/dist/main.js
+npm install -g sunaba-cli        # or, in a built clone: node packages/cli/dist/main.js
 
 cd my-image
 sunaba init                      # writes sunaba.json + Dockerfile
