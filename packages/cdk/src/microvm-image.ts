@@ -37,6 +37,22 @@ export interface MicrovmImageSource {
   bind(scope: Construct): BoundSource;
 }
 
+const OBJECT_READ_ACTIONS = ["s3:GetObject", "s3:GetObjectVersion"];
+
+/**
+ * Object-level read on one key. `bucket.grantRead(grantee, key)` would also
+ * grant `s3:List*` and `s3:GetBucket*` on the bucket itself.
+ */
+function grantObjectRead(bucket: s3.IBucket, key: string, grantee: iam.IGrantable): iam.Grant {
+  bucket.encryptionKey?.grantDecrypt(grantee);
+  return iam.Grant.addToPrincipalOrResource({
+    grantee,
+    actions: OBJECT_READ_ACTIONS,
+    resourceArns: [bucket.arnForObjects(key)],
+    resource: bucket,
+  });
+}
+
 /** IAM resource wildcards in a key would widen the artifact grant. */
 function assertNoIamWildcard(key: string): void {
   if (/[*?]/.test(key)) {
@@ -76,7 +92,7 @@ export const MicrovmImageSources = {
           grantRead: (grantee) =>
             grantee.grantPrincipal.addToPrincipalPolicy(
               new iam.PolicyStatement({
-                actions: ["s3:GetObject", "s3:GetObjectVersion"],
+                actions: OBJECT_READ_ACTIONS,
                 resources: [objectArn],
               }),
             ),
@@ -92,7 +108,7 @@ export const MicrovmImageSources = {
     return {
       bind: () => ({
         uri: `s3://${bucket.bucketName}/${key}`,
-        grantRead: (grantee) => bucket.grantRead(grantee, key),
+        grantRead: (grantee) => grantObjectRead(bucket, key, grantee),
       }),
     };
   },
@@ -113,8 +129,7 @@ export const MicrovmImageSources = {
         const asset = new s3assets.Asset(scope, "CodeArtifact", { path, exclude });
         return {
           uri: `s3://${asset.bucket.bucketName}/${asset.s3ObjectKey}`,
-          // Scope read to the exact uploaded object, not the whole bucket.
-          grantRead: (grantee) => asset.bucket.grantRead(grantee, asset.s3ObjectKey),
+          grantRead: (grantee) => grantObjectRead(asset.bucket, asset.s3ObjectKey, grantee),
         };
       },
     };

@@ -5,6 +5,7 @@ import {
   App,
   aws_ec2 as ec2,
   aws_iam as iam,
+  aws_kms as kms,
   RemovalPolicy,
   Stack,
   aws_s3 as s3,
@@ -145,6 +146,20 @@ describe("MicrovmImage", () => {
     template.hasResourceProperties("AWS::Lambda::MicrovmImage", {
       CodeArtifact: { Uri: Match.objectLike({ "Fn::Join": Match.anyValue() }) },
     });
+    // Read is limited to the uploaded object, not the bootstrap bucket.
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: ["s3:GetObject", "s3:GetObjectVersion"],
+            Resource: {
+              "Fn::Join": ["", Match.arrayWith([Match.stringLikeRegexp("^/[0-9a-f]{64}\\.zip$")])],
+            },
+          }),
+        ]),
+      },
+    });
+    expect(JSON.stringify(template.toJSON())).not.toMatch(/s3:List|s3:GetBucket/);
   });
 
   // Staging a directory asset copies it to <outdir>/asset.<hash>/ — synth for
@@ -266,7 +281,7 @@ describe("MicrovmImage", () => {
     });
   });
 
-  it("fromBucket source grants bucket read", () => {
+  it("fromBucket source grants read on that key only", () => {
     const app = new App();
     const stack = new Stack(app, "TestStack");
     const bucket = s3.Bucket.fromBucketName(stack, "Bucket", "real-bucket");
@@ -281,12 +296,70 @@ describe("MicrovmImage", () => {
       PolicyDocument: {
         Statement: Match.arrayWith([
           Match.objectLike({
-            Action: Match.arrayWith(["s3:GetObject*"]),
-            Resource: Match.arrayWith([Match.objectLike({ "Fn::Join": Match.anyValue() })]),
+            Action: ["s3:GetObject", "s3:GetObjectVersion"],
+            Resource: {
+              "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":s3:::real-bucket/k.zip"]],
+            },
           }),
         ]),
       },
     });
+    const json = JSON.stringify(template.toJSON());
+    expect(json).not.toMatch(/s3:List|s3:GetBucket/);
+    expect(json).not.toContain('":s3:::real-bucket"');
+  });
+
+  it("fromBucket source grants decrypt on the bucket's KMS key", () => {
+    const app = new App();
+    const stack = new Stack(app, "TestStack");
+    const key = new kms.Key(stack, "Key");
+    const bucket = s3.Bucket.fromBucketAttributes(stack, "Bucket", {
+      bucketName: "real-bucket",
+      encryptionKey: key,
+    });
+    new MicrovmImage(stack, "Image", {
+      source: MicrovmImageSources.fromBucket(bucket, "k.zip"),
+    });
+    Template.fromStack(stack).hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: "kms:Decrypt",
+            Resource: stack.resolve(key.keyArn) as Record<string, unknown>,
+          }),
+        ]),
+      },
+    });
+  });
+
+  it("fromBucket falls back to the bucket policy for an immutable role", () => {
+    const app = new App();
+    const stack = new Stack(app, "T");
+    const bucket = new s3.Bucket(stack, "Bucket");
+    const role = iam.Role.fromRoleArn(stack, "Imported", "arn:aws:iam::123456789012:role/ext", {
+      mutable: false,
+    });
+    const image = new MicrovmImage(stack, "Image", {
+      source: MicrovmImageSources.fromBucket(bucket, "k.zip"),
+      buildRole: role,
+    });
+    const template = Template.fromStack(stack);
+    template.hasResourceProperties("AWS::S3::BucketPolicy", {
+      PolicyDocument: {
+        Statement: [
+          Match.objectLike({
+            Action: ["s3:GetObject", "s3:GetObjectVersion"],
+            Principal: { AWS: "arn:aws:iam::123456789012:role/ext" },
+          }),
+        ],
+      },
+    });
+    const policyIds = Object.keys(template.findResources("AWS::S3::BucketPolicy"));
+    const resource = Object.values(template.findResources("AWS::Lambda::MicrovmImage"))[0] as {
+      DependsOn?: string[];
+    };
+    expect(resource.DependsOn ?? []).toEqual(expect.arrayContaining(policyIds));
+    expect(image.node.metadata.filter((m) => m.type === "aws:cdk:warning")).toHaveLength(0);
   });
 
   it("applies a custom removal policy", () => {
