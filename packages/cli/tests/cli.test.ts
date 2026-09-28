@@ -145,6 +145,20 @@ function ctx(lines: string[] = [], extra: Partial<CliContext> = {}, state = "RUN
   };
 }
 
+/** Advance fake timers until `p` settles — for code that sleeps between polls. */
+async function runTimersUntilSettled(p: Promise<unknown>): Promise<void> {
+  let settled = false;
+  void p.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  for (let i = 0; i < 1_000 && !settled; i++) await vi.advanceTimersByTimeAsync(1_000);
+}
+
 describe("parseArgs", () => {
   it("parses flags, values, positionals and --", () => {
     const a = parseArgs(["exec", "m-1", "--timeout", "5000", "--json", "--", "ls", "-la"]);
@@ -1042,6 +1056,100 @@ describe("logs", () => {
     });
     expect(code).toBe(0);
     expect(lines).toEqual(["1970-01-01T00:00:00.001Z ]0;titlered\ttab\nnext2Jend"]);
+  });
+
+  /** GetLogEvents answers from a script, one step per call. */
+  class ScriptedLogs extends FakeLogs {
+    constructor(
+      private script: (Error | { events: { message: string }[]; nextForwardToken: string })[],
+    ) {
+      super();
+    }
+    override async send(command: unknown): Promise<unknown> {
+      const name = (command as { constructor: { name: string } }).constructor.name;
+      if (name !== "GetLogEventsCommand") return super.send(command);
+      this.calls.push(command);
+      const step = this.script.shift() ?? new Error("script exhausted");
+      if (step instanceof Error) throw step;
+      return step;
+    }
+  }
+  const page = (nextForwardToken: string, ...messages: string[]) => ({
+    events: messages.map((message) => ({ message })),
+    nextForwardToken,
+  });
+
+  /** Run `logs --follow` until the script's final non-transient error stops it. */
+  async function follow(fake: FakeLogs): Promise<string[]> {
+    const lines: string[] = [];
+    vi.useFakeTimers();
+    try {
+      const run = cmdLogs(parseArgs(["m-1", "--group", "g", "--follow"]), {
+        region: "us-east-1",
+        logsClient: fake,
+        out: (l) => lines.push(l.replace(/^\S+ /, "")),
+        err: (l) => lines.push(`ERR ${l}`),
+      });
+      const stopped = expect(run).rejects.toThrow(/not authorized/);
+      await runTimersUntilSettled(run);
+      await stopped;
+    } finally {
+      vi.useRealTimers();
+    }
+    return lines;
+  }
+
+  it("--follow prints the backlog, then polls from the saved token for new events", async () => {
+    const fake = new ScriptedLogs([
+      page("f1", "a"),
+      awsError("ThrottlingException", "Rate exceeded"),
+      page("f2", "b"),
+      page("f2"),
+      page("f2"),
+      page("f3", "c"),
+      page("f3"),
+      awsError("ThrottlingException", "Rate exceeded"),
+      awsError("AccessDeniedException", "not authorized"),
+    ]);
+    expect(await follow(fake)).toEqual([
+      "a",
+      "ERR warning: Rate exceeded — retrying",
+      "b",
+      "c",
+      "ERR warning: Rate exceeded — retrying",
+    ]);
+    // Backlog (retrying f1 once), then every poll resumes from the last
+    // token — nothing is printed twice.
+    expect(fake.inputs("GetLogEventsCommand").map((g) => g.nextToken)).toEqual([
+      undefined,
+      "f1",
+      "f1",
+      "f2",
+      "f2",
+      "f2",
+      "f3",
+      "f3",
+      "f3",
+    ]);
+  });
+
+  it("--follow stops retrying a backlog page after 5 transient errors and keeps polling", async () => {
+    const throttled = () => awsError("ThrottlingException", "Rate exceeded");
+    const fake = new ScriptedLogs([
+      throttled(),
+      throttled(),
+      throttled(),
+      throttled(),
+      throttled(),
+      page("f1", "a"),
+      page("f1"),
+      awsError("AccessDeniedException", "not authorized"),
+    ]);
+    expect(await follow(fake)).toEqual([
+      ...Array(5).fill("ERR warning: Rate exceeded — retrying"),
+      "ERR warning: giving up on backlog for m-1 — following live",
+      "a",
+    ]);
   });
 });
 
