@@ -30,8 +30,6 @@ import { configPath, loadConfig, type SunabaConfig, writeConfig } from "./config
 export type LogsClient = LambdaMicrovmsClientLike;
 
 export interface CliContext extends ClientOptions {
-  /** Injected for tests; defaults to the real AWS client. */
-  client?: LambdaMicrovmsClientLike;
   /** Injected CloudWatch Logs client (tests). */
   logsClient?: LogsClient;
   out?: (line: string) => void;
@@ -280,8 +278,10 @@ export async function cmdRun(args: ParsedArgs, ctx: CliContext): Promise<number>
         if (sb) {
           await sb.terminate();
         } else {
-          // VM was created but the Sandbox wrapper doesn't exist yet —
-          // still inside Sandbox.create's RUNNING wait.
+          // VM was created but no Sandbox wrapper exists: a signal landed
+          // during Sandbox.create's RUNNING wait, or create failed after
+          // its own best-effort terminate. TerminateMicrovm is idempotent,
+          // so repeating it is safe and retries one the SDK could not send.
           const client = resolveClient(clientOpts(ctx));
           await client.send(new TerminateMicrovmCommand({ microvmIdentifier: vmId }));
         }
@@ -547,9 +547,7 @@ async function sendWithConflictRetry(
   } catch (e) {
     if ((e as { name?: string }).name !== "ConflictException") throw e;
   }
-  const info = await settle();
-  if (info === "dead") return "dead";
-  return info;
+  return settle();
 }
 
 /** Shared driver for `suspend` and `resume` — identical flow, different command/goal. */
