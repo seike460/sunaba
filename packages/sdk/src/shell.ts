@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import { StringDecoder } from "node:string_decoder";
 import WebSocket from "ws";
 import { SunabaError, TimeoutError } from "./errors.js";
 import type { ExecOptions, ExecResult } from "./types.js";
@@ -135,13 +136,24 @@ export async function execOverShell(opts: ShellExecOptions): Promise<ExecResult>
     const payload = `eval "$(printf %s '${wrapped}' | base64 -d)"; ${marker}\n`;
 
     let text = "";
+    let textBytes = 0;
     const maxOutputBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+    // One decoder for the whole stream: a multi-byte character split across
+    // two binary frames would otherwise decode to U+FFFD twice.
+    const decoder = new StringDecoder("utf8");
     ws.on("message", (d: Buffer) => {
-      text += d.toString("utf8");
+      const chunk = decoder.write(d);
+      text += chunk;
+      textBytes += Buffer.byteLength(chunk);
       // Keep the tail: the done marker always arrives at the end, and an
       // unbounded buffer turns output-heavy commands into O(n^2) scans.
-      if (text.length > maxOutputBytes) {
-        text = text.slice(text.length - maxOutputBytes);
+      if (textBytes > maxOutputBytes) {
+        const buf = Buffer.from(text, "utf8");
+        let start = buf.length - maxOutputBytes;
+        // Cut on a character boundary (skip UTF-8 continuation bytes).
+        while (start < buf.length && ((buf[start] ?? 0) & 0xc0) === 0x80) start++;
+        text = buf.toString("utf8", start);
+        textBytes = buf.length - start;
       }
     });
 

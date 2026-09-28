@@ -165,4 +165,44 @@ describe("execOverShell", () => {
       }),
     ).rejects.toThrow(/closed/i);
   });
+
+  it("caps retained output in UTF-8 bytes and keeps the tail", async () => {
+    const head = "x".repeat(200);
+    const tail = "あ".repeat(100); // 300 bytes, 100 UTF-16 code units
+    wss = fakeShellServer((n) => `${head}\n${tail}\n__SUNABA_DONE_${n}_0__\n`);
+    const p = port(wss);
+    const res = await execOverShell({
+      endpoint: `127.0.0.1:${p}`,
+      url: `ws://127.0.0.1:${p}`,
+      token: "tok",
+      command: "true",
+      timeoutMs: 5_000,
+      maxOutputBytes: 120,
+    });
+    expect(res.exitCode).toBe(0);
+    expect(res.output).toMatch(/^あ+$/);
+    expect(Buffer.byteLength(res.output)).toBeLessThanOrEqual(120);
+  });
+
+  it("decodes a multi-byte character split across binary frames", async () => {
+    wss = new WebSocketServer({ port: 0 });
+    wss.on("connection", (ws) => {
+      ws.on("message", (data: Buffer) => {
+        const m = /__SUNABA_DONE_([a-z0-9]+)_%d__/.exec(data.toString());
+        if (!m) return;
+        const out = Buffer.from(`日本語\n__SUNABA_DONE_${m[1]}_0__\n`);
+        ws.send(out.subarray(0, 4), { binary: true }); // cuts "本" after its first byte
+        ws.send(out.subarray(4), { binary: true });
+      });
+    });
+    const p = port(wss);
+    const res = await execOverShell({
+      endpoint: `127.0.0.1:${p}`,
+      url: `ws://127.0.0.1:${p}`,
+      token: "tok",
+      command: "echo 日本語",
+      timeoutMs: 5_000,
+    });
+    expect(res.output).toBe("日本語");
+  });
 });
