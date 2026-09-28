@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,8 +11,18 @@ import {
   aws_s3 as s3,
 } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { MicrovmImage, MicrovmImageSources, MicrovmNetworkConnector } from "../src/index.js";
+
+const tmpDirs: string[] = [];
+function tmp(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tmpDirs.push(dir);
+  return dir;
+}
+afterEach(() => {
+  for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 
 function stackWithImage(props?: Partial<Parameters<typeof MicrovmImage>[2]>) {
   const app = new App();
@@ -135,7 +145,7 @@ describe("MicrovmImage", () => {
   });
 
   it("packages a local directory as an S3 asset", () => {
-    const dir = mkdtempSync(join(tmpdir(), "sunaba-asset-"));
+    const dir = tmp("sunaba-asset-");
     writeFileSync(join(dir, "Dockerfile"), "FROM al2023\n");
     const app = new App();
     const stack = new Stack(app, "TestStack");
@@ -166,7 +176,7 @@ describe("MicrovmImage", () => {
   // real and walk the staged files so exclusion is verified end to end,
   // including nested paths.
   function synthAssetEntries(source: Parameters<typeof MicrovmImage>[2]["source"]) {
-    const outdir = mkdtempSync(join(tmpdir(), "sunaba-out-"));
+    const outdir = tmp("sunaba-out-");
     const app = new App({ outdir });
     const stack = new Stack(app, "TestStack");
     new MicrovmImage(stack, "Image", { source });
@@ -184,7 +194,7 @@ describe("MicrovmImage", () => {
   }
 
   it("keeps secrets and noise out of directory assets by default", () => {
-    const dir = mkdtempSync(join(tmpdir(), "sunaba-asset-"));
+    const dir = tmp("sunaba-asset-");
     writeFileSync(join(dir, "Dockerfile"), "FROM al2023\n");
     writeFileSync(join(dir, "app.js"), "code\n");
     writeFileSync(join(dir, ".env"), "SECRET=x\n");
@@ -217,7 +227,7 @@ describe("MicrovmImage", () => {
   });
 
   it("honours a caller-provided exclude list (replaces the defaults)", () => {
-    const dir = mkdtempSync(join(tmpdir(), "sunaba-asset-"));
+    const dir = tmp("sunaba-asset-");
     writeFileSync(join(dir, "Dockerfile"), "FROM al2023\n");
     writeFileSync(join(dir, ".env"), "kept when caller opts out of defaults\n");
     const entries = synthAssetEntries(
@@ -394,7 +404,7 @@ describe("MicrovmImage", () => {
   });
 
   it("image resource depends on the grant policy for a directory asset + imported role", () => {
-    const dir = mkdtempSync(join(tmpdir(), "sunaba-asset-"));
+    const dir = tmp("sunaba-asset-");
     writeFileSync(join(dir, "Dockerfile"), "FROM al2023\n");
     const app = new App();
     const stack = new Stack(app, "T");
