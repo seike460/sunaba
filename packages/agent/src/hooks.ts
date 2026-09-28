@@ -46,9 +46,10 @@ export function envHookHandlers(env: NodeJS.ProcessEnv = process.env): HooksHand
     const cmd = env[`SUNABA_HOOK_${name.toUpperCase()}`];
     if (!cmd) continue;
     handlers[name] = async (body) => {
-      // Reuse the exec machinery: process-group kill on timeout and the
-      // drain grace, so backgrounded hook commands can't hang the lifecycle
-      // request or orphan inside the MicroVM.
+      // Reuse the exec machinery: the drain grace keeps a backgrounded
+      // process (e.g. a daemon started by the ready hook) from hanging the
+      // lifecycle request, and that process keeps running after the command
+      // exits. Only a timeout kills the command's whole process group.
       const r = await runExec({
         command: cmd,
         stdin: Buffer.from(JSON.stringify(body ?? {})).toString("base64"),
