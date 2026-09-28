@@ -2,12 +2,13 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { strFromU8, unzipSync } from "fflate";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildMicrovmImage, zipDirectory } from "../src/image.js";
 import { ARN, FakeMicrovmsClient } from "./helpers.js";
 
 let tmp: string | undefined;
 afterEach(() => {
+  vi.useRealTimers();
   if (tmp) rmSync(tmp, { recursive: true, force: true });
   tmp = undefined;
 });
@@ -141,9 +142,6 @@ describe("buildMicrovmImage", () => {
     const client = new FakeMicrovmsClient((cmd: any) => {
       const name = cmd.constructor.name as string;
       if (name === "CreateMicrovmImageCommand") return { imageArn: ARN, imageVersion: "1.0" };
-      if (name === "ListMicrovmImageVersionsCommand") {
-        return { items: [{ imageVersion: "1.0", createdAt: new Date(1) }] };
-      }
       if (name === "GetMicrovmImageVersionCommand") {
         return { state: "SUCCESSFUL", status: "ACTIVE" };
       }
@@ -165,6 +163,43 @@ describe("buildMicrovmImage", () => {
     expect(create.input.codeArtifact).toEqual({ uri: "s3://bucket/key.zip" });
     expect(create.input.resources).toEqual([{ minimumMemoryInMiB: 2048 }]);
     expect(create.input.environmentVariables).toEqual({ LOG_LEVEL: "info" });
+  });
+
+  it("without imageVersion in the response, waits for a version that did not exist before", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const old = { imageVersion: "1.0", createdAt: new Date(1) };
+    let lists = 0;
+    const client = new FakeMicrovmsClient((cmd: any) => {
+      const name = cmd.constructor.name as string;
+      if (name === "ListMicrovmImagesCommand") {
+        return { items: [{ name: "demo", imageArn: ARN }] };
+      }
+      if (name === "ListMicrovmImageVersionsCommand") {
+        lists += 1;
+        // The snapshot and the first poll see only the old version.
+        return {
+          items: lists < 3 ? [old] : [old, { imageVersion: "2.0", createdAt: new Date(2) }],
+        };
+      }
+      if (name === "CreateMicrovmImageCommand") return { imageArn: ARN };
+      if (name === "GetMicrovmImageVersionCommand") {
+        return { state: "SUCCESSFUL", status: "ACTIVE" };
+      }
+      return {};
+    });
+    const building = buildMicrovmImage({
+      name: "demo",
+      source: { s3Uri: "s3://bucket/key.zip" },
+      baseImageArn: "arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+      buildRoleArn: "arn:aws:iam::123456789012:role/build",
+      client,
+      region: "us-east-1",
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const res = await building;
+    expect(res.imageVersion).toBe("2.0");
+    expect(lists).toBe(3);
+    expect(client.callsOf("GetMicrovmImageVersionCommand")[0].input.imageVersion).toBe("2.0");
   });
 
   it("fails instead of snapshotting no versions when listing existing ones fails", async () => {
