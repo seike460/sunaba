@@ -121,6 +121,52 @@ describe("buildMicrovmImage", () => {
     expect(create.input.environmentVariables).toEqual({ LOG_LEVEL: "info" });
   });
 
+  it("fails instead of snapshotting no versions when listing existing ones fails", async () => {
+    const throttled = Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" });
+    const client = new FakeMicrovmsClient((cmd: any) => {
+      const name = cmd.constructor.name as string;
+      if (name === "ListMicrovmImagesCommand") return { items: [{ name: "demo", imageArn: ARN }] };
+      if (name === "ListMicrovmImageVersionsCommand") throw throttled;
+      if (name === "CreateMicrovmImageCommand") return { imageArn: ARN };
+      return {};
+    });
+    await expect(
+      buildMicrovmImage({
+        name: "demo",
+        source: { s3Uri: "s3://bucket/key.zip" },
+        baseImageArn: "arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+        buildRoleArn: "arn:aws:iam::123456789012:role/build",
+        client,
+        region: "us-east-1",
+      }),
+    ).rejects.toBe(throttled);
+    expect(client.callsOf("CreateMicrovmImageCommand")).toHaveLength(0);
+  });
+
+  it("treats a missing image as having no prior versions", async () => {
+    const client = new FakeMicrovmsClient((cmd: any) => {
+      const name = cmd.constructor.name as string;
+      if (name === "ListMicrovmImagesCommand") return { items: [] };
+      if (name === "CreateMicrovmImageCommand") return { imageArn: ARN };
+      if (name === "ListMicrovmImageVersionsCommand") {
+        return { items: [{ imageVersion: "1.0", createdAt: new Date(1) }] };
+      }
+      if (name === "GetMicrovmImageVersionCommand") {
+        return { state: "SUCCESSFUL", status: "ACTIVE" };
+      }
+      return {};
+    });
+    const res = await buildMicrovmImage({
+      name: "demo",
+      source: { s3Uri: "s3://bucket/key.zip" },
+      baseImageArn: "arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+      buildRoleArn: "arn:aws:iam::123456789012:role/build",
+      client,
+      region: "us-east-1",
+    });
+    expect(res.imageVersion).toBe("1.0");
+  });
+
   it("rejects more than one egress connector before any side effect", async () => {
     const client = new FakeMicrovmsClient(() => ({}));
     await expect(

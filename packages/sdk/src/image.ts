@@ -16,7 +16,7 @@ import type {
   MicrovmImageBuildOptions,
   MicrovmImageBuildResult,
 } from "./types.js";
-import { required, sleep } from "./util.js";
+import { isNotFoundError, required, sleep } from "./util.js";
 import { waitForImageVersion } from "./waiters.js";
 
 const DEFAULT_PREFIX = "sunaba/images/";
@@ -46,11 +46,18 @@ export async function buildMicrovmImage(
   // imageVersion, the fallback below must wait for a version it hasn't seen.
   const preExisting = new Set(
     // imageIdentifier wants an ARN/ID — resolve the name first when it
-    // exists; a brand-new image just yields an empty snapshot.
+    // exists; only a brand-new (not found) image yields an empty snapshot.
+    // Other errors (throttling, AccessDenied) must surface — an empty
+    // snapshot would let the fallback return an older version.
     (
       await resolveImageArn(client, opts.name)
         .then((arn) => listAllVersions(client, arn))
-        .catch(() => [])
+        .catch((e) => {
+          if ((e instanceof SunabaError && e.code === "ImageNotFound") || isNotFoundError(e)) {
+            return [];
+          }
+          throw e;
+        })
     ).map((v) => v.imageVersion),
   );
   const res = (await client.send(
