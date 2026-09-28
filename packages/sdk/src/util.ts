@@ -1,6 +1,6 @@
 import { SunabaError } from "./errors.js";
 
-/** Default cap for captured process output (stdout or stderr). */
+/** Default cap for retained shell (PTY) output, which merges stdout and stderr. */
 export const DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 
 export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));

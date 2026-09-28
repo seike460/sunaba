@@ -50,7 +50,11 @@ export type PortSpec = number | "all" | { from: number; to: number };
 
 /** Client injection point: a real LambdaMicrovmsClient, config, or test stub. */
 export interface ClientOptions {
-  /** AWS region. Defaults to AWS_REGION/AWS_DEFAULT_REGION env or the client's. */
+  /**
+   * AWS region. Defaults to the injected `client`'s region, then
+   * `clientConfig.region`, then AWS_REGION/AWS_DEFAULT_REGION, then the
+   * default provider chain (shared config profile, SSO, IMDS).
+   */
   region?: string;
   /** Pre-configured client (useful for tests or custom credentials). */
   client?: LambdaMicrovmsClientLike;
