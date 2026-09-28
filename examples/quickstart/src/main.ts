@@ -3,11 +3,17 @@
  * suspend/resume it, then clean up.
  *
  * Prerequisites:
- *   - AWS credentials with lambda-microvms permissions (see README)
- *   - A built image: `sunaba build --name demo` (see examples/demo-image)
+ *   - At the repo root: `npm install && npm run build` (this example
+ *     imports sunaba-sdk from packages/sdk/dist)
+ *   - AWS credentials allowed lambda:RunMicrovm, lambda:GetMicrovm,
+ *     lambda:ListMicrovmImageVersions, lambda:CreateMicrovmShellAuthToken,
+ *     lambda:SuspendMicrovm, lambda:ResumeMicrovm, lambda:TerminateMicrovm
+ *   - A built image: in examples/demo-image, fill in artifactBucket and
+ *     buildRoleArn in sunaba.json (or pass --bucket/--role), then
+ *     `sunaba build`
  *   - export SUNABA_IMAGE=arn:aws:lambda:REGION:ACCOUNT:microvm-image:demo
  *
- * Run: npm start
+ * Run (in this directory): npm start
  */
 import { Sandbox } from "sunaba-sdk";
 
