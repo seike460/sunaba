@@ -1,6 +1,8 @@
+import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   linkSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -250,6 +252,31 @@ describe("fs API", () => {
     expect(readFileSync(existing, "utf8")).toBe("#!/bin/sh\n");
   });
 
+  it("maps fs.cp rejections of the source tree to 400", async () => {
+    const withFifo = path.join(dir, "cp-fifo");
+    mkdirSync(withFifo);
+    execFileSync("mkfifo", [path.join(withFifo, "pipe")]);
+    const fifo = await post(apiPort, "/fs/copy", {
+      from: withFifo,
+      to: path.join(dir, "cp-fifo-dst"),
+      recursive: true,
+    });
+    expect(fifo.status).toBe(400);
+    expect(((await fifo.json()) as { error: { code: string } }).error.code).toBe(
+      "ERR_FS_CP_FIFO_PIPE",
+    );
+
+    const tree = path.join(dir, "cp-tree");
+    mkdirSync(tree);
+    const file = path.join(dir, "cp-onto-file");
+    writeFileSync(file, "x");
+    const onto = await post(apiPort, "/fs/copy", { from: tree, to: file, recursive: true });
+    expect(onto.status).toBe(400);
+    expect(((await onto.json()) as { error: { code: string } }).error.code).toBe(
+      "ERR_FS_CP_DIR_TO_NON_DIR",
+    );
+  });
+
   it("404s on missing files and 400s on missing args", async () => {
     expect((await post(apiPort, "/fs/read", { path: path.join(dir, "nope") })).status).toBe(404);
     expect((await post(apiPort, "/fs/read", {})).status).toBe(400);
@@ -272,7 +299,6 @@ describe("fs API", () => {
 
   it("does not block on FIFOs", async () => {
     const fifo = path.join(dir, "pipe");
-    const { execFileSync } = await import("node:child_process");
     execFileSync("mkfifo", [fifo]);
     const start = Date.now();
     const res = await post(apiPort, "/fs/read", { path: fifo });
