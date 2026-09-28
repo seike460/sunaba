@@ -15,6 +15,13 @@
       "import": "./dist/guest/index.js"
     }
   },
+  "typesVersions": {
+    "*": {
+      "guest": [
+        "./dist/guest/index.d.ts"
+      ]
+    }
+  },
   "files": [
     "dist"
   ],
