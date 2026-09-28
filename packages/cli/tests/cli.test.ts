@@ -190,11 +190,17 @@ describe("init", () => {
     expect(cfg.name).toBe(path.basename(dir));
     expect(cfg.baseImage).toBe("al2023-1");
     const dockerfile = readFileSync(path.join(dir, "Dockerfile"), "utf8");
-    // The agent is OPTIONAL — mentioned but commented out until published;
-    // never COPY a directory init doesn't create.
+    // The agent is OPTIONAL — shown commented out; never COPY a directory
+    // init doesn't create.
     expect(dockerfile).toContain("sunaba-agent");
     expect(dockerfile).not.toMatch(/^RUN npm install -g sunaba-agent$/m);
     expect(dockerfile).not.toContain("COPY sunaba-agent/");
+    // Installing the agent without starting it serves nothing — the
+    // commented recipe must include the command that runs it.
+    expect(dockerfile).toMatch(/^#\s+CMD \["sunaba-agentd"\]$/m);
+    // init users installed from npm: no steps that need a sunaba checkout.
+    expect(dockerfile).not.toContain("npm pack");
+    expect(dockerfile).not.toContain("once published");
     expect(JSON.parse(readFileSync(path.join(dir, "sunaba.json"), "utf8")).sourceDir).toBe(".");
   });
 

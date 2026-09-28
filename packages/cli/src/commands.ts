@@ -89,13 +89,12 @@ RUN microdnf install -y nodejs tar && microdnf clean all
 # OPTIONAL in-guest agent: exec/fs API on :8080 + lifecycle hooks on
 # :9000. Exec/shell work agent-free via the managed SHELL_INGRESS
 # connector, so you only need this for the HTTP API or hooks.
-# sunaba-agent ships in this repo — once published, uncomment:
+# To use it, uncomment these lines. The agent only answers while
+# sunaba-agentd runs: make it the container command, or start it from
+# your own entrypoint next to the app.
 #   RUN npm install -g sunaba-agent
 #   EXPOSE 8080 9000
-# Or vendor it: run \`npm pack\` inside this repo's packages/agent,
-# COPY the resulting .tgz into this directory, then:
-#   COPY sunaba-agent-*.tgz .
-#   RUN npm install -g ./sunaba-agent-*.tgz && rm ./sunaba-agent-*.tgz
+#   CMD ["sunaba-agentd"]
 
 # Replace with your real application entrypoint.
 # CMD ["node", "/app/server.js"]
