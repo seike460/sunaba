@@ -403,6 +403,16 @@ describe("run", () => {
     expect(run.input.imageVersion).toBe("1.0");
   });
 
+  it("attaches the managed HTTP_INGRESS + SHELL_INGRESS connectors (never ALL_INGRESS)", async () => {
+    const { client, context } = ctx();
+    await cmdRun(parseArgs(["--image", "demo"]), context);
+    // RunMicrovm rejects ALL_INGRESS combined with any other ingress connector.
+    expect(client.callsOf("RunMicrovmCommand")[0].input.ingressNetworkConnectors).toEqual([
+      "arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:HTTP_INGRESS",
+      "arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:SHELL_INGRESS",
+    ]);
+  });
+
   it("--image-version pins the version; --version works as a compat alias", async () => {
     const { client, context } = ctx();
     await cmdRun(parseArgs(["--image", "demo", "--image-version", "9.9"]), context);
