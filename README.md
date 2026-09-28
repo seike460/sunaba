@@ -96,6 +96,19 @@ const res = await sb.request("/exec", {
 });
 ```
 
+The endpoint token behind `request()` and `websocket()` covers every port
+by default (`allowedPorts: ["all"]`). That includes the guest agent's
+`:8080`, whose exec API has no auth of its own, and the hooks server on
+`:9000`. Scope the token to the ports you call:
+
+```ts
+const sb = await Sandbox.connect("m-abc123", { allowedPorts: [3000] });
+// also accepts ranges: [{ from: 3000, to: 3010 }]
+```
+
+`exec()` and the interactive shell use a separate shell token, so
+`allowedPorts` does not affect them.
+
 ## CDK
 
 ```ts

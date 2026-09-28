@@ -20,7 +20,7 @@ await sb.terminate();
 - `sb.exec / sb.interactiveShell` — managed `SHELL_INGRESS` WebSocket PTY, no guest agent needed
 - `sb.writeFile / readFile / request / websocket` — fs helpers + authenticated HTTP and WebSocket to in-VM ports
 - `buildMicrovmImage` — zip → S3 → `CreateMicrovmImage` → `SUCCESSFUL` wait
-- `AuthTokenManager` / `ShellTokenManager` — JWE mint + auto-refresh, port-scoped
+- `AuthTokenManager` / `ShellTokenManager` — JWE mint + auto-refresh, port-scoped (endpoint tokens cover all ports unless you pass `allowedPorts`)
 - `waitForMicrovmState`, `listMicrovms`, `resolveImageArn`, `latestActiveVersion`
 - `sunaba-sdk/guest` — `startHooksServer` serves the lifecycle hooks (`/run`, `/suspend`, …) from your app inside the VM
 
