@@ -891,6 +891,12 @@ describe("logs", () => {
     );
   });
 
+  it("the usage error lists --tail with the other logs flags", async () => {
+    await expect(cmdLogs(parseArgs([]), { region: "us-east-1" })).rejects.toThrow(
+      /\[--group name\] \[--follow\] \[--tail n\]/,
+    );
+  });
+
   /** Managed groups whose DescribeLogStreams can fail per group. */
   class ProbeFailLogs extends FakeLogs {
     constructor(

@@ -822,7 +822,7 @@ async function resolveLogTarget(
 export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number> {
   assertFlags(args, ["group", "follow", "tail"]);
   const id = args._[0];
-  if (!id) throw new Error("usage: sunaba logs <microvm-id> [--group name] [--follow]");
+  if (!id) throw new Error("usage: sunaba logs <microvm-id> [--group name] [--follow] [--tail n]");
   if (args._.length > 1) throw new Error(`unexpected arguments: ${args._.slice(1).join(" ")}`);
   const tail = flagInt(args, "tail", { min: 1, max: 10_000 });
   const follow = flagBool(args, "follow");
