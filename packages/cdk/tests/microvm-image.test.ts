@@ -1,10 +1,17 @@
 import { mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { App, aws_iam as iam, RemovalPolicy, Stack, aws_s3 as s3 } from "aws-cdk-lib";
+import {
+  App,
+  aws_ec2 as ec2,
+  aws_iam as iam,
+  RemovalPolicy,
+  Stack,
+  aws_s3 as s3,
+} from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
-import { MicrovmImage, MicrovmImageSources } from "../src/index.js";
+import { MicrovmImage, MicrovmImageSources, MicrovmNetworkConnector } from "../src/index.js";
 
 function stackWithImage(props?: Partial<Parameters<typeof MicrovmImage>[2]>) {
   const app = new App();
@@ -337,9 +344,7 @@ describe("MicrovmImage", () => {
     expect(image.node.metadata.filter((m) => m.type === "aws:cdk:warning")).toHaveLength(0);
   });
 
-  it("resolves a real MicrovmNetworkConnector in egressConnectors", async () => {
-    const { MicrovmNetworkConnector } = await import("../src/index.js");
-    const { aws_ec2: ec2 } = await import("aws-cdk-lib");
+  it("resolves a real MicrovmNetworkConnector in egressConnectors", () => {
     const app = new App();
     const stack = new Stack(app, "T");
     const vpc = new ec2.Vpc(stack, "Vpc", { natGateways: 0 });

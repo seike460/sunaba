@@ -19,7 +19,7 @@ import {
   cmdStatus,
   cmdSuspend,
 } from "../src/commands.js";
-import { loadConfig } from "../src/config.js";
+import { loadConfig, writeConfig } from "../src/config.js";
 
 // A default-constructed LambdaMicrovmsClient is only reached through the
 // regionOf fallback — every other path injects ctx.client. Its region
@@ -263,7 +263,6 @@ describe("build", () => {
 
   it("takes name/role/bucket from sunaba.json", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "sunaba-cli-"));
-    const { writeConfig } = await import("../src/config.js");
     writeConfig(
       {
         name: "cfg-name",
@@ -713,8 +712,7 @@ describe("validation & config", () => {
     );
   });
 
-  it("loadConfig rejects malformed configs with clear errors", async () => {
-    const { writeFileSync } = await import("node:fs");
+  it("loadConfig rejects malformed configs with clear errors", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "sunaba-cli-"));
     writeFileSync(path.join(dir, "sunaba.json"), JSON.stringify({ name: 123 }));
     expect(() => loadConfig(dir)).toThrow(/"name" must be a string/);

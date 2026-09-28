@@ -3,7 +3,7 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { type AgentServers, startAgent } from "../src/index.js";
+import { type AgentServers, envHookHandlers, startAgent } from "../src/index.js";
 
 let servers: AgentServers;
 let apiPort: number;
@@ -298,7 +298,6 @@ describe("hooks server", () => {
     const prev = process.env.SUNABA_HOOK_READY;
     process.env.SUNABA_HOOK_READY = "sleep 30 & echo ok";
     try {
-      const { envHookHandlers } = await import("../src/hooks.js");
       const s = startAgent({ port: 0, hooksPort: 0, host: "127.0.0.1", hooks: envHookHandlers() });
       await new Promise((r) => setImmediate(r));
       const hp = addr(s.hooks as Server);
@@ -319,7 +318,6 @@ describe("hooks server", () => {
     process.env.SUNABA_HOOK_VALIDATE = "exit 0";
     process.env.SUNABA_HOOK_TIMEOUT_MS = "7200000"; // > MAX_TIMEOUT_MS
     try {
-      const { envHookHandlers } = await import("../src/hooks.js");
       const s = startAgent({ port: 0, hooksPort: 0, host: "127.0.0.1", hooks: envHookHandlers() });
       await new Promise((r) => setImmediate(r));
       const hp = addr(s.hooks as Server);
@@ -340,14 +338,12 @@ describe("hooks server", () => {
     const prev = process.env.SUNABA_HOOK_RUN;
     process.env.SUNABA_HOOK_RUN = `cat > "${marker}"`;
     try {
-      const { envHookHandlers } = await import("../src/hooks.js");
       const s = startAgent({ port: 0, hooksPort: 0, host: "127.0.0.1", hooks: envHookHandlers() });
       await new Promise((r) => setImmediate(r));
       const hp = addr(s.hooks as Server);
       const res = await post(hp, "/aws/lambda-microvms/runtime/v1/run", { microvmId: "m-1" });
       expect(res.status).toBe(200);
       await s.close();
-      const { readFileSync } = await import("node:fs");
       expect(JSON.parse(readFileSync(marker, "utf8"))).toEqual({ microvmId: "m-1" });
     } finally {
       if (prev === undefined) delete process.env.SUNABA_HOOK_RUN;
