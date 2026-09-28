@@ -885,6 +885,73 @@ describe("logs", () => {
     );
   });
 
+  /** Managed groups whose DescribeLogStreams can fail per group. */
+  class ProbeFailLogs extends FakeLogs {
+    constructor(
+      private groups: string[],
+      private failFor: (group: string) => Error | undefined,
+    ) {
+      super();
+    }
+    override async send(command: unknown): Promise<unknown> {
+      const name = (command as { constructor: { name: string } }).constructor.name;
+      const input = (command as { input: { logGroupName?: string } }).input;
+      if (name === "DescribeLogGroupsCommand") {
+        this.calls.push(command);
+        return { logGroups: this.groups.map((logGroupName) => ({ logGroupName })) };
+      }
+      const err =
+        name === "DescribeLogStreamsCommand" ? this.failFor(input.logGroupName ?? "") : undefined;
+      if (err) {
+        this.calls.push(command);
+        throw err;
+      }
+      return super.send(command);
+    }
+  }
+  const awsError = (name: string, message: string) => Object.assign(new Error(message), { name });
+
+  it("surfaces a stream probe failure instead of 'no log streams'", async () => {
+    // AccessDenied/throttling must not read as "this MicroVM has no logs".
+    const fake = new ProbeFailLogs(["/aws/lambda-microvms/demo"], () =>
+      awsError("AccessDeniedException", "not authorized to perform: logs:DescribeLogStreams"),
+    );
+    await expect(
+      cmdLogs(parseArgs(["m-1"]), { region: "us-east-1", logsClient: fake }),
+    ).rejects.toThrow(/not authorized/);
+  });
+
+  it("a probe failure in one group doesn't hide the streams found in another", async () => {
+    // Least-privilege IAM may allow DescribeLogStreams on some groups only.
+    const fake = new ProbeFailLogs(
+      ["/aws/lambda-microvms/demo", "/aws/lambda-microvms/denied"],
+      (g) =>
+        g.endsWith("/denied") ? awsError("AccessDeniedException", "not authorized") : undefined,
+    );
+    const lines: string[] = [];
+    const code = await cmdLogs(parseArgs(["m-1"]), {
+      region: "us-east-1",
+      logsClient: fake,
+      out: (l) => lines.push(l),
+    });
+    expect(code).toBe(0);
+    expect(lines.map((l) => l.replace(/^\S+ /, ""))).toEqual(["a", "b"]);
+  });
+
+  it("treats a group deleted mid-scan as having no streams", async () => {
+    const fake = new ProbeFailLogs(["/aws/lambda-microvms/demo"], () =>
+      awsError("ResourceNotFoundException", "The specified log group does not exist."),
+    );
+    const lines: string[] = [];
+    const code = await cmdLogs(parseArgs(["m-1"]), {
+      region: "us-east-1",
+      logsClient: fake,
+      err: (l) => lines.push(l),
+    });
+    expect(code).toBe(1);
+    expect(lines[0]).toContain("no log streams matching m-1");
+  });
+
   it("prefers the VM's image-specific log group over unrelated groups", async () => {
     // Multiple managed groups exist; the target stream lives only in the
     // image-specific one (image name "demo" comes from the VM's imageArn).

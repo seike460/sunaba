@@ -796,11 +796,18 @@ async function resolveLogTarget(
   // Probe groups with bounded concurrency — a busy account can have many
   // managed groups and a sequential scan would be slow.
   const CONCURRENCY = 4;
+  // A group deleted mid-scan simply has no streams. Any other probe
+  // failure (AccessDenied, throttling) only matters when no group yields
+  // the streams — then it, not "no log streams", is the real cause.
+  let probeError: unknown;
   for (let i = 0; i < ordered.length; i += CONCURRENCY) {
     const batch = await Promise.all(
       ordered.slice(i, i + CONCURRENCY).map(async (group) => ({
         group,
-        streams: await findStreams(cw, group, id).catch(() => [] as string[]),
+        streams: await findStreams(cw, group, id).catch((e: unknown) => {
+          if (!isNotFoundError(e)) probeError ??= e;
+          return [] as string[];
+        }),
       })),
     );
     const hit = batch.find((b) => b.streams.length);
@@ -809,6 +816,7 @@ async function resolveLogTarget(
   if (!ordered.length) {
     throw new Error(`no log group under ${LOG_GROUP_PREFIX} — pass --group`);
   }
+  if (probeError !== undefined) throw probeError;
   return { group: ordered[0] as string, streams: [] };
 }
 
