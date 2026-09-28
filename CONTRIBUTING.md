@@ -1,6 +1,8 @@
 # Contributing
 
 Thanks for your interest in sunaba. Issues and pull requests are welcome.
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md),
+not in a public issue.
 
 ## Setup
 

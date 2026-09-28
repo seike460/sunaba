@@ -185,7 +185,8 @@ npm run check        # biome
 ## Status
 
 Early — built against the Lambda MicroVMs GA API surface
-(`@aws-sdk/client-lambda-microvms`). Feedback welcome via issues.
+(`@aws-sdk/client-lambda-microvms`). Feedback welcome via issues. To
+report a vulnerability, see [SECURITY.md](SECURITY.md) instead.
 
 ## License
 
