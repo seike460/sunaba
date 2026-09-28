@@ -361,7 +361,7 @@ export async function cmdRun(args: ParsedArgs, ctx: CliContext): Promise<number>
     if (command) {
       stderr(ctx)(`${vmId} ${sb.endpoint}`);
       const res = await sb.exec(command, { timeoutMs });
-      stdout(ctx)(res.output);
+      stdout(ctx)(json ? JSON.stringify({ microvmId: vmId, ...res }) : res.output);
       return res.exitCode;
     }
     stdout(ctx)(

@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { Sandbox } from "sunaba-sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { flagBool, flagInt, flagStr, parseArgs } from "../src/args.js";
 import {
@@ -449,6 +450,26 @@ describe("run", () => {
       "executionRoleArn",
     ]);
     expect(Object.keys(out).every((k) => allowed.has(k))).toBe(true);
+  });
+
+  it("--json with a command prints the exec result as JSON, not raw output", async () => {
+    const exec = vi.spyOn(Sandbox.prototype, "exec").mockResolvedValue({
+      output: "hi\n",
+      exitCode: 3,
+    });
+    try {
+      for (const argv of [
+        ["--image", "demo", "--json", "--", "echo", "hi"],
+        ["--image", "demo", "--json", "--exec", "echo hi"],
+      ]) {
+        const { context, lines } = ctx();
+        expect(await cmdRun(parseArgs(argv), context)).toBe(3);
+        const out = lines.filter((l) => !l.startsWith("ERR ")).map((l) => JSON.parse(l));
+        expect(out).toEqual([{ microvmId: "m-1", output: "hi\n", exitCode: 3 }]);
+      }
+    } finally {
+      exec.mockRestore();
+    }
   });
 
   it("--no-auto-resume alone produces an idlePolicy with autoResumeEnabled=false", async () => {
