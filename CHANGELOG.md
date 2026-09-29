@@ -29,7 +29,26 @@ The first npm release since 0.1.0; it includes the 0.1.1 fix.
 - `sunaba-sdk`: aborting `waitForMicrovmState()` or
   `waitForImageVersion()` through `signal` throws a `SunabaError`
   with code `"Aborted"` instead of a `TimeoutError`. The abort also cuts
-  short the wait between polls.
+  short the wait between polls, and wins over the result of a poll that
+  was in flight when it came.
+- `sunaba-sdk`: the waiters reject a `timeoutMs` that is not a number of
+  at least 1 with `BadTimeout`, and an `intervalMs` outside 1 to 2^31-1 ms
+  with `BadInterval`, before the first poll. A `NaN` timeout used to make
+  the wait endless.
+- `sunaba-sdk`: `Sandbox.create()` and `connect()` check `runTimeoutMs`
+  (`BadTimeout`), `tokenTtlMinutes` (`BadTokenTtl`) and `allowedPorts`
+  (`BadPort`) before any API call, so a bad value no longer fails on a
+  MicroVM that is already running. `create()` also rejects a
+  `maximumDurationSeconds` (`BadMaxDuration`) or idle policy seconds
+  (`BadIdlePolicy`) that are not integers 1 to 28800; `NaN` and `0` used
+  to be dropped.
+- `sunaba-sdk`: `request()` and `websocket()` reject a `port` that is not
+  an integer 1 to 65535 (`BadPort`). `websocket()` rejects a `timeoutMs`,
+  and `openShellSocket()` a `connectTimeoutMs`, outside 1 to 2^31-1 ms
+  (`BadTimeout`).
+- `sunaba-sdk`: `buildMicrovmImage()` rejects a `memoryMiB` that is not a
+  positive integer (`BadMemory`) and a `buildTimeoutMs` below 1
+  (`BadTimeout`) before it uploads anything.
 - `sunaba-sdk`: `exec()` (and `readFile()`, which uses it) rejects a
   `maxOutputBytes` that is not a non-negative integer with `BadMaxOutputBytes`,
   and a `timeoutMs` outside 1 to 2^31-1 ms with `BadTimeout`, before
@@ -38,10 +57,23 @@ The first npm release since 0.1.0; it includes the 0.1.1 fix.
 - `sunaba-sdk`: `startHooksServer()` answers 400 to a body that is not
   valid JSON and does not call the handler (0.1.0 passed `{}`). A
   handler's error is logged with `console.error`.
+- `sunaba-sdk`: `startHooksServer()` from `sunaba-sdk/guest` rejects a
+  `maxBodyBytes` that is not a non-negative integer with
+  `BadMaxBodyBytes`. `NaN` or `Infinity` turned the body limit off.
 - `sunaba-cdk`: the `constructs` peer dependency is `^10.5.0`, the range
   `aws-cdk-lib@2.261.0` already requires.
 - `sunaba-cli`: `sunaba --help` lists the flags of each command, including
   `run --idle`, `--suspended` and `--role`.
+- `sunaba-cli`: numeric flags accept decimal integers only. An empty
+  value such as `--tail=` is no longer read as 0, and `0x10` or `1e3` are
+  rejected.
+- `sunaba-agent`: `startJsonServer()` and `startHooksServer()` throw a
+  `RangeError` for a `maxBodyBytes` that is not a non-negative integer.
+  `NaN` or `Infinity` turned the body limit off.
+- `sunaba-agent`: a `SUNABA_HOOK_TIMEOUT_MS` that is not a positive number
+  (for example `5m`) makes `envHookHandlers()` and `startAgent()` throw a
+  `RangeError`, and `sunaba-agentd` exit with code 2. It used to fall back
+  to 300000 ms. An empty value still counts as unset.
 
 ### Fixed
 
@@ -59,6 +91,8 @@ The first npm release since 0.1.0; it includes the 0.1.1 fix.
   smaller than its completion marker, or when a background job keeps
   writing to the shell after the command ends.
 - `sunaba-sdk`: `readFile()` reads a path that starts with `-`.
+- `sunaba-sdk`: `waitForImageVersion()` keeps its 15-minute default when
+  `timeoutMs` is passed as `undefined` (it used 120 s).
 - `sunaba-sdk`: `buildMicrovmImage()` surfaces errors other than
   not-found (throttling, AccessDenied) while listing the image's existing
   versions, instead of treating the image as new.
@@ -71,6 +105,8 @@ The first npm release since 0.1.0; it includes the 0.1.1 fix.
 - `sunaba-cli`: `sunaba logs` reports a `DescribeLogStreams` or
   `GetMicrovm` error such as AccessDenied instead of treating it as "no
   log stream".
+- `sunaba-agent`: `startAgent()` no longer leaves the API server listening
+  when the hooks server fails to start.
 - `sunaba-agent`: `/fs/copy` gives a copied single file the source's mode.
 - `sunaba-agent`: `/fs/copy` answers 400 instead of 500 when the copy
   meets a FIFO, a socket or mismatched file types.
