@@ -1,6 +1,6 @@
 {
   "name": "sunaba-cdk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "AWS CDK L2 constructs for AWS Lambda MicroVMs",
   "type": "module",
   "main": "./dist/index.js",

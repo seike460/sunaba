@@ -1,6 +1,6 @@
 {
   "name": "sunaba-cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "CLI for AWS Lambda MicroVMs - build images, run sandboxes, exec commands",
   "type": "module",
   "bin": {
@@ -31,7 +31,7 @@
   "dependencies": {
     "@aws-sdk/client-cloudwatch-logs": "^3.1141.0",
     "@aws-sdk/client-lambda-microvms": "^3.1141.0",
-    "sunaba-sdk": "^0.1.0"
+    "sunaba-sdk": "^0.1.2"
   },
   "devDependencies": {
     "@types/node": "^26.0.0"

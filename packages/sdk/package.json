@@ -1,6 +1,6 @@
 {
   "name": "sunaba-sdk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "High-level TypeScript SDK for AWS Lambda MicroVMs - sandboxes, exec, auth tokens, lifecycle",
   "type": "module",
   "main": "./dist/index.js",

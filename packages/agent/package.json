@@ -1,6 +1,6 @@
 {
   "name": "sunaba-agent",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Optional in-guest agent for AWS Lambda MicroVMs - exec and filesystem API plus lifecycle hooks",
   "type": "module",
   "bin": {

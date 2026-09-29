@@ -7,6 +7,10 @@ one version number and follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-09-29
+
+The first npm release since 0.1.0; it includes the 0.1.1 fix.
+
 ### Security
 
 - `sunaba-sdk`: `Sandbox.request()` follows a redirect only while it stays
@@ -56,8 +60,9 @@ one version number and follow [Semantic Versioning](https://semver.org/).
   `moduleResolution: "node10"`.
 - `sunaba-cli`: `sunaba run --json` with a command prints the result as
   JSON.
-- `sunaba-cli`: `sunaba logs` reports a `DescribeLogStreams` error such as
-  AccessDenied instead of treating it as "no log stream".
+- `sunaba-cli`: `sunaba logs` reports a `DescribeLogStreams` or
+  `GetMicrovm` error such as AccessDenied instead of treating it as "no
+  log stream".
 - `sunaba-agent`: `/fs/copy` gives a copied single file the source's mode.
 - `sunaba-agent`: `/fs/copy` answers 400 instead of 500 when the copy
   meets a FIFO, a socket or mismatched file types.
@@ -98,6 +103,7 @@ Initial release. Requires Node.js ≥ 20.
   built for the GovCloud (`aws-us-gov`) and China (`aws-cn`) partitions
   too.
 
-[Unreleased]: https://github.com/seike460/sunaba/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/seike460/sunaba/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/seike460/sunaba/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/seike460/sunaba/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/seike460/sunaba/releases/tag/v0.1.0
