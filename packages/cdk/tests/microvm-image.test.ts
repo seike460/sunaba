@@ -486,6 +486,11 @@ describe("MicrovmImage", () => {
     const stack = new Stack(app, "T");
     const src = MicrovmImageSources.fromS3Uri("s3://bkt/k.zip");
     expect(() => new MicrovmImage(stack, "I1", { source: src, memoryMiB: 0 })).toThrow(/memoryMiB/);
+    for (const [i, memoryMiB] of [Number.NaN, Number.POSITIVE_INFINITY, -1024, 1024.5].entries()) {
+      expect(() => new MicrovmImage(stack, `M${i}`, { source: src, memoryMiB })).toThrow(
+        /memoryMiB must be one of/,
+      );
+    }
     expect(() => new MicrovmImage(stack, "I2", { source: src, name: " " })).toThrow(/image name/);
     expect(() => MicrovmImageSources.fromS3Uri("https://b/k")).toThrow(/S3 URI/);
     // IAM wildcards in a key would widen the object-level grant.
