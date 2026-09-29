@@ -28,13 +28,20 @@ export interface AgentOptions {
 export interface AgentServers {
   api: Server;
   hooks?: Server;
+  close(): Promise<void>;
+}
+
+/**
+ * What {@link startAgent} returns. `ready` lives here, not on
+ * {@link AgentServers}, so values built to the 0.1.0 shape still type-check.
+ */
+export interface AgentServersWithReady extends AgentServers {
   /**
    * Resolves once every server listens. If one fails to listen (e.g.
    * EADDRINUSE), the others are closed first, then it rejects with that
    * error. The error still goes to `onError` too.
    */
   ready: Promise<void>;
-  close(): Promise<void>;
 }
 
 /**
@@ -42,7 +49,7 @@ export interface AgentServers {
  * unless disabled, a lifecycle hook server on `hooksPort` (9000).
  * The servers listen asynchronously; await `ready` to know they do.
  */
-export function startAgent(opts: AgentOptions = {}): AgentServers {
+export function startAgent(opts: AgentOptions = {}): AgentServersWithReady {
   // Resolve the hooks first: a bad SUNABA_HOOK_TIMEOUT_MS must throw
   // before any server is listening.
   const handlers =

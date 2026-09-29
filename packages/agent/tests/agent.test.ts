@@ -17,7 +17,7 @@ import { request as httpRequest, type IncomingMessage, type Server } from "node:
 import { type AddressInfo, connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   type AgentServers,
   envHookHandlers,
@@ -655,6 +655,18 @@ describe("agent wiring", () => {
     expect(s.api.listening).toBe(true);
     expect(s.hooks?.listening).toBe(true);
     await s.close();
+  });
+
+  it("AgentServers still accepts the 0.1.0 shape, without ready", () => {
+    // Checked by `npm run typecheck`: a test double or wrapper typed as
+    // AgentServers must keep compiling.
+    expectTypeOf<{
+      api: Server;
+      hooks?: Server;
+      close(): Promise<void>;
+    }>().toExtend<AgentServers>();
+    expectTypeOf(startAgent).returns.toExtend<AgentServers>();
+    expectTypeOf(startAgent).returns.toHaveProperty("ready").toEqualTypeOf<Promise<void>>();
   });
 
   it("close() resolves promptly with an in-flight exec and reaps it", async () => {

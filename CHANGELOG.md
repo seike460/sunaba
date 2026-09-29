@@ -34,7 +34,9 @@ The first npm release since 0.1.0; it includes the 0.1.1 fix.
 - `sunaba-agent`: `startAgent()` returns a `ready` promise. It resolves
   once every server it started listens. If one cannot listen, for example
   because the port is in use, it closes the others and rejects with that
-  error.
+  error. The return type is the new `AgentServersWithReady`, which extends
+  `AgentServers`. `AgentServers` itself does not change, so code that
+  builds or implements one still compiles.
 
 ### Changed
 
