@@ -3,7 +3,7 @@ import { StringDecoder } from "node:string_decoder";
 import WebSocket from "ws";
 import { SunabaError, TimeoutError } from "./errors.js";
 import type { ExecOptions, ExecResult } from "./types.js";
-import { DEFAULT_MAX_OUTPUT_BYTES, MAX_TIMER_MS, shellQuote, sleep } from "./util.js";
+import { checkNumber, DEFAULT_MAX_OUTPUT_BYTES, MAX_TIMER_MS, shellQuote, sleep } from "./util.js";
 
 /** The managed shell listens inside the MicroVM on this port. */
 export const SHELL_PORT = 8022;
@@ -62,7 +62,7 @@ export function microvmSubprotocols(token: string, port: number): string[] {
 export interface ShellSocketOptions {
   endpoint: string;
   token: string;
-  /** Connect timeout. Default 15s. */
+  /** Connect timeout, 1 to 2^31-1 ms (else "BadTimeout"). Default 15s. */
   connectTimeoutMs?: number;
   /**
    * Override the full WebSocket URL (for tests / non-TLS endpoints).
@@ -76,9 +76,11 @@ export interface ShellSocketOptions {
  * Returns the raw WebSocket; data is a bidirectional byte stream to the shell.
  */
 export async function openShellSocket(opts: ShellSocketOptions): Promise<WebSocket> {
+  const timeout = opts.connectTimeoutMs ?? 15_000;
+  // setTimeout fires at once for NaN and for anything above 2^31-1 ms.
+  checkNumber(timeout, "connectTimeoutMs", "BadTimeout", { min: 1, max: MAX_TIMER_MS });
   const url = opts.url ?? `wss://${opts.endpoint}/shell`;
   const ws = new WebSocket(url, microvmSubprotocols(opts.token, SHELL_PORT));
-  const timeout = opts.connectTimeoutMs ?? 15_000;
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       ws.close();

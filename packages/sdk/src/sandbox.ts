@@ -11,7 +11,12 @@ import WebSocket from "ws";
 import { connectorArns, ManagedEgressConnector, ManagedIngressConnector } from "./connectors.js";
 import { SunabaError } from "./errors.js";
 import { execOverShell, microvmSubprotocols, openShellSocket, pipeInteractive } from "./shell.js";
-import { AuthTokenManager, ShellTokenManager } from "./tokens.js";
+import {
+  AuthTokenManager,
+  checkTtlMinutes,
+  ShellTokenManager,
+  toPortSpecifications,
+} from "./tokens.js";
 import { regionForConnectors, resolveClient } from "./transport.js";
 import {
   type ClientOptions,
@@ -19,13 +24,22 @@ import {
   type ExecOptions,
   type ExecResult,
   type LambdaMicrovmsClientLike,
+  MAX_MICROVM_DURATION_SECONDS,
   type MicrovmState,
   type PortSpec,
   type RequestOptions,
   type SandboxConnectOptions,
   type SandboxCreateOptions,
 } from "./types.js";
-import { DEFAULT_MAX_OUTPUT_BYTES, isNotFoundError, required, shellQuote, sleep } from "./util.js";
+import {
+  checkNumber,
+  DEFAULT_MAX_OUTPUT_BYTES,
+  isNotFoundError,
+  MAX_TIMER_MS,
+  required,
+  shellQuote,
+  sleep,
+} from "./util.js";
 import { getMicrovm, waitForMicrovmState } from "./waiters.js";
 
 /** Methods that are safe to auto-retry after a failed request. */
@@ -98,6 +112,20 @@ export class Sandbox {
    * `image` may be a full ARN or an image name (resolved via ListMicrovmImages).
    */
   static async create(opts: SandboxCreateOptions): Promise<Sandbox> {
+    checkSandboxOptions(opts);
+    if (opts.maximumDurationSeconds !== undefined) {
+      checkNumber(opts.maximumDurationSeconds, "maximumDurationSeconds", "BadMaxDuration", {
+        min: 1,
+        max: MAX_MICROVM_DURATION_SECONDS,
+        integer: true,
+      });
+    }
+    if (opts.idlePolicy !== undefined) {
+      const { maxIdleDurationSeconds, suspendedDurationSeconds } = opts.idlePolicy;
+      const seconds = { min: 1, max: 28_800, integer: true };
+      checkNumber(maxIdleDurationSeconds, "maxIdleDurationSeconds", "BadIdlePolicy", seconds);
+      checkNumber(suspendedDurationSeconds, "suspendedDurationSeconds", "BadIdlePolicy", seconds);
+    }
     const client = resolveClient(opts);
     const ingress = opts.ingress ?? DEFAULT_INGRESS;
     const egress = opts.egress ?? [ManagedEgressConnector.INTERNET];
@@ -164,6 +192,7 @@ export class Sandbox {
 
   /** Attach to an existing MicroVM by ID (resuming it first if suspended). */
   static async connect(microvmId: string, opts: SandboxConnectOptions = {}): Promise<Sandbox> {
+    checkSandboxOptions(opts);
     const client = resolveClient(opts);
     // A just-created MicroVM may 404 briefly — retry a few seconds.
     let info: Awaited<ReturnType<typeof getMicrovm>> | undefined;
@@ -250,6 +279,7 @@ export class Sandbox {
    * any other origin is returned as-is so the token never leaves it.
    */
   async request(path: string, opts: RequestOptions = {}): Promise<Response> {
+    if (opts.port !== undefined) checkPort(opts.port);
     const url = `https://${this.endpoint}${path.startsWith("/") ? path : `/${path}`}`;
     const headers = new Headers(opts.headers);
     if (opts.port !== undefined) headers.set("X-aws-proxy-port", String(opts.port));
@@ -292,7 +322,9 @@ export class Sandbox {
   /**
    * Authenticated WebSocket to an app port inside the MicroVM.
    * Auth and port selection ride on Sec-WebSocket-Protocol subprotocols.
-   * Resolves once the socket is open.
+   * Resolves once the socket is open. `port` (default 8080) must be an
+   * integer 1-65535 ("BadPort"); `timeoutMs` (default 15s) 1 to 2^31-1 ms
+   * ("BadTimeout").
    */
   async websocket(
     path: string,
@@ -300,6 +332,8 @@ export class Sandbox {
   ): Promise<import("ws").WebSocket> {
     const p = path.startsWith("/") ? path : `/${path}`;
     const timeout = opts.timeoutMs ?? 15_000;
+    checkNumber(timeout, "timeoutMs", "BadTimeout", { min: 1, max: MAX_TIMER_MS });
+    if (opts.port !== undefined) checkPort(opts.port);
     const attempt = async (): Promise<WebSocket> => {
       const token = await this.auth.get();
       const ws = new WebSocket(`wss://${this.endpoint}${p}`, [
@@ -508,6 +542,22 @@ export class Sandbox {
       if (!info.state || !goalStates.includes(info.state)) throw e;
     }
   }
+}
+
+/**
+ * Numeric options shared by create() and connect(), checked before any API
+ * call: found later, a bad value would fail on a MicroVM that already runs.
+ */
+function checkSandboxOptions(opts: SandboxConnectOptions): void {
+  if (opts.runTimeoutMs !== undefined) {
+    checkNumber(opts.runTimeoutMs, "runTimeoutMs", "BadTimeout", { min: 1 });
+  }
+  checkTtlMinutes(opts.tokenTtlMinutes ?? 30, "tokenTtlMinutes");
+  toPortSpecifications(opts.allowedPorts ?? ["all"]);
+}
+
+function checkPort(port: number): void {
+  checkNumber(port, "port", "BadPort", { min: 1, max: 65_535, integer: true });
 }
 
 /** Read and discard a body to free the keep-alive connection. */

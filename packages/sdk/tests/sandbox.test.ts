@@ -2,6 +2,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { latestActiveVersion, Sandbox } from "../src/sandbox.js";
+import { DEFAULT_IDLE_POLICY } from "../src/types.js";
 import { ARN, FakeMicrovmsClient } from "./helpers.js";
 
 function makeClient(overrides: Record<string, unknown> = {}) {
@@ -77,11 +78,76 @@ describe("Sandbox.create", () => {
   });
 });
 
+describe("Sandbox option checks", () => {
+  const idle = (patch: Partial<typeof DEFAULT_IDLE_POLICY>) => ({
+    idlePolicy: { ...DEFAULT_IDLE_POLICY, ...patch },
+  });
+
+  it.each([
+    [{ runTimeoutMs: Number.NaN }, "BadTimeout"],
+    [{ runTimeoutMs: 0 }, "BadTimeout"],
+    [{ tokenTtlMinutes: Number.NaN }, "BadTokenTtl"],
+    [{ tokenTtlMinutes: Number.POSITIVE_INFINITY }, "BadTokenTtl"],
+    [{ allowedPorts: [Number.NaN] }, "BadPort"],
+    [{ allowedPorts: [-1] }, "BadPort"],
+    [{ maximumDurationSeconds: Number.NaN }, "BadMaxDuration"],
+    [{ maximumDurationSeconds: 0 }, "BadMaxDuration"],
+    [{ maximumDurationSeconds: 1.5 }, "BadMaxDuration"],
+    [{ maximumDurationSeconds: 28_801 }, "BadMaxDuration"],
+    [idle({ maxIdleDurationSeconds: Number.NaN }), "BadIdlePolicy"],
+    [idle({ maxIdleDurationSeconds: 0 }), "BadIdlePolicy"],
+    [idle({ suspendedDurationSeconds: -1 }), "BadIdlePolicy"],
+    [idle({ suspendedDurationSeconds: Number.POSITIVE_INFINITY }), "BadIdlePolicy"],
+  ])("create() rejects %o with %s before any API call", async (bad, code) => {
+    const client = makeClient();
+    await expect(
+      Sandbox.create({ image: "demo", client, region: "us-east-1", ...bad }),
+    ).rejects.toMatchObject({ code });
+    expect(client.calls).toHaveLength(0);
+  });
+
+  it.each([
+    [{ runTimeoutMs: Number.NaN }, "BadTimeout"],
+    [{ runTimeoutMs: -1 }, "BadTimeout"],
+    [{ tokenTtlMinutes: 0 }, "BadTokenTtl"],
+    [{ allowedPorts: [{ from: Number.NaN, to: 80 }] }, "BadPort"],
+  ])("connect() rejects %o with %s before any API call", async (bad, code) => {
+    const client = makeClient();
+    await expect(Sandbox.connect("mvm-1", { client, ...bad })).rejects.toMatchObject({ code });
+    expect(client.calls).toHaveLength(0);
+  });
+
+  it("create() still passes valid limits through to RunMicrovm", async () => {
+    const client = makeClient();
+    await Sandbox.create({
+      image: "demo",
+      client,
+      region: "us-east-1",
+      maximumDurationSeconds: 28_800,
+      ...idle({ maxIdleDurationSeconds: 60 }),
+    });
+    const run = client.callsOf("RunMicrovmCommand")[0];
+    expect(run.input.maximumDurationInSeconds).toBe(28_800);
+    expect(run.input.idlePolicy).toEqual({ ...DEFAULT_IDLE_POLICY, maxIdleDurationSeconds: 60 });
+  });
+});
+
 describe("Sandbox.request", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, 65_536, 80.5])(
+    "rejects port %s with BadPort before sending",
+    async (port) => {
+      const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+      const fetchSpy = vi.fn(async () => new Response("ok"));
+      vi.stubGlobal("fetch", fetchSpy);
+      await expect(sbx.request("/health", { port })).rejects.toMatchObject({ code: "BadPort" });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
 
   it("sends auth + port headers and retries once on 403 with a fresh token", async () => {
     const client = mintingClient();

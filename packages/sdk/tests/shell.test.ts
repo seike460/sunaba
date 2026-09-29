@@ -2,7 +2,7 @@ import { type AddressInfo, createServer, type Server, type Socket } from "node:n
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { TimeoutError } from "../src/errors.js";
-import { execOverShell, microvmSubprotocols, tailBytes } from "../src/shell.js";
+import { execOverShell, microvmSubprotocols, openShellSocket, tailBytes } from "../src/shell.js";
 
 /** Fake PTY end: extracts the nonce from the marker in the payload and answers. */
 function fakeShellServer(script: (nonce: string) => string) {
@@ -268,6 +268,23 @@ describe("execOverShell", () => {
       });
     }
     expect(connections).toBe(0); // rejected before connecting
+  });
+
+  it("rejects a connectTimeoutMs that would fire at once, before connecting", async () => {
+    let connections = 0;
+    wss = new WebSocketServer({ port: 0 });
+    wss.on("connection", () => connections++);
+    const p = port(wss);
+    const base = { endpoint: `127.0.0.1:${p}`, url: `ws://127.0.0.1:${p}`, token: "tok" };
+    for (const connectTimeoutMs of [Number.NaN, Number.POSITIVE_INFINITY, 0, -5, 2 ** 31]) {
+      await expect(openShellSocket({ ...base, connectTimeoutMs })).rejects.toMatchObject({
+        code: "BadTimeout",
+      });
+      await expect(
+        execOverShell({ ...base, command: "true", connectTimeoutMs }),
+      ).rejects.toMatchObject({ code: "BadTimeout" });
+    }
+    expect(connections).toBe(0);
   });
 
   it("finishes when maxOutputBytes is smaller than the done marker", async () => {

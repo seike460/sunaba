@@ -16,7 +16,7 @@ import type {
   MicrovmImageBuildOptions,
   MicrovmImageBuildResult,
 } from "./types.js";
-import { isNotFoundError, required, sleep } from "./util.js";
+import { checkNumber, isNotFoundError, required, sleep } from "./util.js";
 import { waitForImageVersion } from "./waiters.js";
 
 const DEFAULT_PREFIX = "sunaba/images/";
@@ -35,6 +35,15 @@ export async function buildMicrovmImage(
       "TooManyConnectors",
       "MicroVM image builds support at most 1 egress connector",
     );
+  }
+  // Checked before the upload and CreateMicrovmImage: a NaN memoryMiB was
+  // dropped without a word, and a bad buildTimeoutMs found later would
+  // abandon a build that has already started.
+  if (opts.memoryMiB !== undefined) {
+    checkNumber(opts.memoryMiB, "memoryMiB", "BadMemory", { min: 1, integer: true });
+  }
+  if (opts.buildTimeoutMs !== undefined) {
+    checkNumber(opts.buildTimeoutMs, "buildTimeoutMs", "BadTimeout", { min: 1 });
   }
   const client = resolveClient(opts);
   // Region is only needed to expand managed connector names; the S3

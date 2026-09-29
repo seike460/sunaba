@@ -264,6 +264,35 @@ describe("buildMicrovmImage", () => {
     expect(client.callsOf("CreateMicrovmImageCommand")).toHaveLength(0);
   });
 
+  it.each([
+    [{ memoryMiB: Number.NaN }, "BadMemory"],
+    [{ memoryMiB: 0 }, "BadMemory"],
+    [{ memoryMiB: -1024 }, "BadMemory"],
+    [{ memoryMiB: 1024.5 }, "BadMemory"],
+    [{ buildTimeoutMs: Number.NaN }, "BadTimeout"],
+    [{ buildTimeoutMs: Number.POSITIVE_INFINITY }, "BadTimeout"],
+    [{ buildTimeoutMs: 0 }, "BadTimeout"],
+  ])("rejects %o with %s before any side effect", async (bad, code) => {
+    // Every call "succeeds" at once, so only the option check can fail.
+    const client = new FakeMicrovmsClient(() => ({
+      imageArn: ARN,
+      imageVersion: "1.0",
+      state: "SUCCESSFUL",
+    }));
+    await expect(
+      buildMicrovmImage({
+        name: "demo",
+        source: { s3Uri: "s3://bucket/key.zip" },
+        baseImageArn: "arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+        buildRoleArn: "arn:aws:iam::123456789012:role/build",
+        client,
+        region: "us-east-1",
+        ...bad,
+      }),
+    ).rejects.toMatchObject({ code });
+    expect(client.calls).toHaveLength(0);
+  });
+
   it("accepts exactly one egress connector", async () => {
     const client = new FakeMicrovmsClient((cmd: any) => {
       const name = cmd.constructor.name as string;

@@ -48,6 +48,20 @@ describe("Sandbox.websocket", () => {
     handshake.dialed = [];
   });
 
+  it.each([
+    [{ port: Number.NaN }, "BadPort"],
+    [{ port: 0 }, "BadPort"],
+    [{ port: 80.5 }, "BadPort"],
+    [{ timeoutMs: Number.NaN }, "BadTimeout"],
+    [{ timeoutMs: Number.POSITIVE_INFINITY }, "BadTimeout"],
+    [{ timeoutMs: -1 }, "BadTimeout"],
+  ])("rejects %o with %s before minting a token or dialing", async (opts, code) => {
+    const { client, sbx } = await connect();
+    await expect(sbx.websocket("/ws", opts)).rejects.toMatchObject({ code });
+    expect(client.callsOf("CreateMicrovmAuthTokenCommand")).toHaveLength(0);
+    expect(handshake.dialed).toHaveLength(0);
+  });
+
   it("carries the token and port as subprotocols ahead of the caller's own", async () => {
     const { sbx } = await connect();
     await sbx.websocket("ws", { port: 3000, protocols: ["chat"] });
