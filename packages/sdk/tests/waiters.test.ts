@@ -1,7 +1,14 @@
-import { describe, expect, it } from "vitest";
-import { StateError } from "../src/errors.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { StateError, TimeoutError } from "../src/errors.js";
 import { waitForImageVersion, waitForMicrovmState } from "../src/waiters.js";
 import { FakeMicrovmsClient } from "./helpers.js";
+
+const notFound = () =>
+  Object.assign(new Error("MicroVM not found"), { name: "ResourceNotFoundException" });
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("waitForMicrovmState", () => {
   it("resolves when the target state is reached", async () => {
@@ -43,6 +50,109 @@ describe("waitForMicrovmState", () => {
     expect(info.state).toBe("TERMINATED");
   });
 
+  it("throws TimeoutError when the target state never arrives", async () => {
+    const client = new FakeMicrovmsClient(() => ({ microvmId: "mvm-1", state: "PENDING" }));
+    await expect(
+      waitForMicrovmState(client, "mvm-1", "RUNNING", { intervalMs: 1, timeoutMs: 50 }),
+    ).rejects.toBeInstanceOf(TimeoutError);
+    expect(client.calls.length).toBeGreaterThan(1);
+  });
+
+  it("tolerates NotFound right after creation, then resolves", async () => {
+    let n = 0;
+    const client = new FakeMicrovmsClient(() => {
+      if (n++ === 0) throw notFound();
+      return { microvmId: "mvm-1", state: "RUNNING" };
+    });
+    const info = await waitForMicrovmState(client, "mvm-1", "RUNNING", { intervalMs: 1 });
+    expect(info.state).toBe("RUNNING");
+    expect(client.calls).toHaveLength(2);
+  });
+
+  it("rethrows NotFound once the grace period has passed", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const err = notFound();
+    let n = 0;
+    const client = new FakeMicrovmsClient(() => {
+      // Past the 10s grace from the second poll on.
+      if (n++ > 0) vi.setSystemTime(Date.now() + 10_001);
+      throw err;
+    });
+    const waiting = waitForMicrovmState(client, "mvm-1", "RUNNING", { intervalMs: 1 });
+    await expect(waiting).rejects.toBe(err);
+    expect(client.calls).toHaveLength(2);
+  });
+
+  it("treats NotFound as TERMINATED when that is the target (record purged)", async () => {
+    const client = new FakeMicrovmsClient(() => {
+      throw notFound();
+    });
+    const info = await waitForMicrovmState(client, "mvm-1", "TERMINATED", { intervalMs: 1 });
+    expect(info.state).toBe("TERMINATED");
+  });
+
+  it("stops with an Aborted error, not a TimeoutError, when already aborted", async () => {
+    const client = new FakeMicrovmsClient(() => ({ microvmId: "mvm-1", state: "PENDING" }));
+    const ac = new AbortController();
+    const reason = new Error("caller gave up");
+    ac.abort(reason);
+    const err = await waitForMicrovmState(client, "mvm-1", "RUNNING", {
+      signal: ac.signal,
+    }).catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(TimeoutError);
+    expect(err).toMatchObject({ code: "Aborted", cause: reason });
+    expect(client.calls).toHaveLength(0);
+  });
+
+  it("aborts during the sleep between polls instead of waiting it out", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const client = new FakeMicrovmsClient(() => ({ microvmId: "mvm-1", state: "PENDING" }));
+    const ac = new AbortController();
+    const waiting = waitForMicrovmState(client, "mvm-1", "RUNNING", {
+      intervalMs: 60_000,
+      signal: ac.signal,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(1); // the first poll is done; now sleeping
+    ac.abort();
+    await expect(waiting).rejects.toMatchObject({ code: "Aborted" });
+    expect(client.calls).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("aborts during an in-flight poll even when it returns the target state", async () => {
+    let answer: (v: unknown) => void = () => {};
+    const client = new FakeMicrovmsClient(
+      () => new Promise((resolve) => (answer = resolve)), // GetMicrovm stays pending
+    );
+    const ac = new AbortController();
+    const reason = new Error("caller gave up");
+    const waiting = waitForMicrovmState(client, "mvm-1", "RUNNING", {
+      intervalMs: 1,
+      signal: ac.signal,
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(client.calls).toHaveLength(1); // the poll is in flight
+    ac.abort(reason);
+    answer({ microvmId: "mvm-1", state: "RUNNING" });
+    await expect(waiting).rejects.toMatchObject({ code: "Aborted", cause: reason });
+    expect(client.calls).toHaveLength(1);
+  });
+
+  it("reports an abort, not the error, when an in-flight poll fails", async () => {
+    let fail: (e: unknown) => void = () => {};
+    const client = new FakeMicrovmsClient(() => new Promise((_r, reject) => (fail = reject)));
+    const ac = new AbortController();
+    const waiting = waitForMicrovmState(client, "mvm-1", "RUNNING", {
+      intervalMs: 1,
+      signal: ac.signal,
+    });
+    await new Promise((r) => setImmediate(r));
+    ac.abort();
+    fail(new Error("socket hang up"));
+    await expect(waiting).rejects.toMatchObject({ code: "Aborted" });
+  });
+
   it("accepts TERMINATED when the target is TERMINATING", async () => {
     const client = new FakeMicrovmsClient(() => ({
       microvmId: "mvm-1",
@@ -67,6 +177,24 @@ describe("waitForImageVersion", () => {
     expect(info.state).toBe("SUCCESSFUL");
   });
 
+  it("tolerates NotFound for a just-created version", async () => {
+    let n = 0;
+    const client = new FakeMicrovmsClient(() => {
+      if (n++ === 0) throw notFound();
+      return { state: "SUCCESSFUL", status: "ACTIVE", imageVersion: "1.0" };
+    });
+    const info = await waitForImageVersion(client, "arn:img", "1.0", { intervalMs: 1 });
+    expect(info.state).toBe("SUCCESSFUL");
+    expect(client.calls).toHaveLength(2);
+  });
+
+  it("throws TimeoutError when the build never finishes", async () => {
+    const client = new FakeMicrovmsClient(() => ({ state: "IN_PROGRESS" }));
+    await expect(
+      waitForImageVersion(client, "arn:img", "1.0", { intervalMs: 1, timeoutMs: 50 }),
+    ).rejects.toBeInstanceOf(TimeoutError);
+  });
+
   it("throws on FAILED", async () => {
     const client = new FakeMicrovmsClient(() => ({
       state: "FAILED",
@@ -76,4 +204,57 @@ describe("waitForImageVersion", () => {
       /build exploded/,
     );
   });
+
+  it("keeps the 15 min default when timeoutMs is passed as undefined", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let n = 0;
+    const client = new FakeMicrovmsClient(() => {
+      vi.setSystemTime(Date.now() + 200_000); // each poll takes 200 s
+      return { state: n++ < 2 ? "IN_PROGRESS" : "SUCCESSFUL" };
+    });
+    const info = await waitForImageVersion(client, "arn:img", "1.0", {
+      timeoutMs: undefined,
+      intervalMs: 1,
+    });
+    expect(info.state).toBe("SUCCESSFUL");
+    expect(client.calls).toHaveLength(3);
+  });
+});
+
+describe("wait options", () => {
+  // The client already reports the target state: only validation can fail.
+  const ready = () =>
+    new FakeMicrovmsClient((cmd: { constructor: { name: string } }) =>
+      cmd.constructor.name === "GetMicrovmCommand"
+        ? { microvmId: "mvm-1", state: "RUNNING" }
+        : { state: "SUCCESSFUL", status: "ACTIVE" },
+    );
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, 0.5, -1])(
+    "rejects timeoutMs %s with BadTimeout before polling",
+    async (timeoutMs) => {
+      const client = ready();
+      await expect(
+        waitForMicrovmState(client, "mvm-1", "RUNNING", { timeoutMs }),
+      ).rejects.toMatchObject({ code: "BadTimeout" });
+      await expect(
+        waitForImageVersion(client, "arn:img", "1.0", { timeoutMs }),
+      ).rejects.toMatchObject({ code: "BadTimeout" });
+      expect(client.calls).toHaveLength(0);
+    },
+  );
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, 0.5, -1, 2 ** 31])(
+    "rejects intervalMs %s with BadInterval before polling",
+    async (intervalMs) => {
+      const client = ready();
+      await expect(
+        waitForMicrovmState(client, "mvm-1", "RUNNING", { intervalMs }),
+      ).rejects.toMatchObject({ code: "BadInterval" });
+      await expect(
+        waitForImageVersion(client, "arn:img", "1.0", { intervalMs }),
+      ).rejects.toMatchObject({ code: "BadInterval" });
+      expect(client.calls).toHaveLength(0);
+    },
+  );
 });

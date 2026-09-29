@@ -39,7 +39,7 @@ const NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
  * L2 construct for `AWS::Lambda::NetworkConnector` — a VPC egress connector
  * MicroVMs can route outbound traffic through. Pass the construct (or its
  * {@link MicrovmNetworkConnector#connectorArn}) in
- * `MicrovmImage#egressConnectors` / `RunMicrovm --egress-network-connectors`.
+ * `MicrovmImageProps#egressConnectors` / `RunMicrovm --egress-network-connectors`.
  */
 export class MicrovmNetworkConnector extends Construct implements IMicrovmNetworkConnector {
   /** ARN of the network connector. */

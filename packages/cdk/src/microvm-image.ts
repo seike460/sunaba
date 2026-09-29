@@ -37,6 +37,22 @@ export interface MicrovmImageSource {
   bind(scope: Construct): BoundSource;
 }
 
+const OBJECT_READ_ACTIONS = ["s3:GetObject", "s3:GetObjectVersion"];
+
+/**
+ * Object-level read on one key. `bucket.grantRead(grantee, key)` would also
+ * grant `s3:List*` and `s3:GetBucket*` on the bucket itself.
+ */
+function grantObjectRead(bucket: s3.IBucket, key: string, grantee: iam.IGrantable): iam.Grant {
+  bucket.encryptionKey?.grantDecrypt(grantee);
+  return iam.Grant.addToPrincipalOrResource({
+    grantee,
+    actions: OBJECT_READ_ACTIONS,
+    resourceArns: [bucket.arnForObjects(key)],
+    resource: bucket,
+  });
+}
+
 /** IAM resource wildcards in a key would widen the artifact grant. */
 function assertNoIamWildcard(key: string): void {
   if (/[*?]/.test(key)) {
@@ -48,7 +64,7 @@ function assertNoIamWildcard(key: string): void {
 
 /**
  * Code artifact source for {@link MicrovmImage}. Use
- * `MicrovmImageSource.fromDirectory()` for local code (uploaded via the CDK
+ * `MicrovmImageSources.fromDirectory()` for local code (uploaded via the CDK
  * bootstrap bucket), `fromS3Uri()`/`fromBucket()` for artifacts already in S3.
  */
 export const MicrovmImageSources = {
@@ -76,7 +92,7 @@ export const MicrovmImageSources = {
           grantRead: (grantee) =>
             grantee.grantPrincipal.addToPrincipalPolicy(
               new iam.PolicyStatement({
-                actions: ["s3:GetObject", "s3:GetObjectVersion"],
+                actions: OBJECT_READ_ACTIONS,
                 resources: [objectArn],
               }),
             ),
@@ -92,7 +108,7 @@ export const MicrovmImageSources = {
     return {
       bind: () => ({
         uri: `s3://${bucket.bucketName}/${key}`,
-        grantRead: (grantee) => bucket.grantRead(grantee, key),
+        grantRead: (grantee) => grantObjectRead(bucket, key, grantee),
       }),
     };
   },
@@ -102,9 +118,11 @@ export const MicrovmImageSources = {
    * The directory is zipped and uploaded to the CDK bootstrap S3 bucket at
    * deploy time (like `lambda.Code.fromAsset`).
    *
-   * `options.exclude` are .gitignore-style patterns REPLACING the safe
-   * defaults ({@link DEFAULT_EXCLUDE_PATTERNS}), which keep secrets like
-   * `.env` and private keys out of the uploaded artifact.
+   * By default, VCS metadata, `node_modules`, `.env*` files, private keys and
+   * credential files (`.aws/`, `.ssh/`, `.npmrc`, `*.tfstate*`, ...) are left
+   * out of the uploaded artifact. `options.exclude` (.gitignore-style
+   * patterns) REPLACES that whole list rather than adding to it — an explicit
+   * list must exclude those secrets itself.
    */
   fromDirectory(path: string, options?: { exclude?: string[] }): MicrovmImageSource {
     const exclude = options?.exclude ?? [...DEFAULT_EXCLUDE_PATTERNS];
@@ -113,8 +131,7 @@ export const MicrovmImageSources = {
         const asset = new s3assets.Asset(scope, "CodeArtifact", { path, exclude });
         return {
           uri: `s3://${asset.bucket.bucketName}/${asset.s3ObjectKey}`,
-          // Scope read to the exact uploaded object, not the whole bucket.
-          grantRead: (grantee) => asset.bucket.grantRead(grantee, asset.s3ObjectKey),
+          grantRead: (grantee) => grantObjectRead(asset.bucket, asset.s3ObjectKey, grantee),
         };
       },
     };
@@ -125,7 +142,7 @@ export const MicrovmImageSources = {
  * Default exclusion patterns for `MicrovmImageSources.fromDirectory` —
  * keeps credentials and VCS metadata out of the build artifact.
  */
-export const DEFAULT_EXCLUDE_PATTERNS: readonly string[] = [
+const DEFAULT_EXCLUDE_PATTERNS: readonly string[] = [
   // VCS / dependency noise.
   ".git",
   "**/.git",

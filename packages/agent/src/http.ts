@@ -23,11 +23,9 @@ const HTTP_ERROR_CODES: Record<number, string> = {
   503: "ServiceUnavailable",
 };
 
-export class BodyTooLarge extends Error {}
-
 const BODY_LIMIT = 32 * 1024 * 1024; // fs payloads can be large files
 
-export async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
+async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   let exceeded = false;
@@ -38,7 +36,7 @@ export async function readJsonBody(req: IncomingMessage, maxBytes: number): Prom
     if (size > maxBytes) exceeded = true;
     else if (!exceeded) chunks.push(c as Buffer);
   }
-  if (exceeded) throw new BodyTooLarge("request body exceeds limit");
+  if (exceeded) throw new HttpError(413, "request body exceeds limit");
   const text = Buffer.concat(chunks).toString("utf8");
   if (!text) return {};
   try {
@@ -48,7 +46,7 @@ export async function readJsonBody(req: IncomingMessage, maxBytes: number): Prom
   }
 }
 
-export function sendJson(res: ServerResponse, status: number, body: unknown): void {
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, { "content-type": "application/json" }).end(payload);
 }
@@ -58,7 +56,13 @@ const ERRNO_STATUS: Record<string, number> = {
   ENOTDIR: 400,
   EISDIR: 400,
   ERR_FS_EISDIR: 400,
+  ERR_FS_CP_DIR_TO_NON_DIR: 400,
   ERR_FS_CP_EINVAL: 400,
+  ERR_FS_CP_FIFO_PIPE: 400,
+  ERR_FS_CP_NON_DIR_TO_DIR: 400,
+  ERR_FS_CP_SOCKET: 400,
+  ERR_FS_CP_SYMLINK_TO_SUBDIRECTORY: 400,
+  ERR_FS_CP_UNKNOWN: 400,
   ERR_INVALID_ARG_VALUE: 400,
   ENAMETOOLONG: 400,
   ELOOP: 400,
@@ -70,15 +74,11 @@ const ERRNO_STATUS: Record<string, number> = {
   EPERM: 403,
 };
 
-export function sendError(res: ServerResponse, err: unknown): void {
-  // The socket may already be dead (client abort, request timeout) — writing
-  // would throw inside the catch path and crash the process.
+function sendError(res: ServerResponse, err: unknown): void {
+  // The socket may already be dead (client abort, closeAllConnections) —
+  // writing would throw inside the catch path and crash the process.
   if (res.destroyed || res.writableEnded) return;
   try {
-    if (err instanceof BodyTooLarge) {
-      sendJson(res, 413, { error: { code: "BodyTooLarge", message: err.message } });
-      return;
-    }
     if (err instanceof HttpError) {
       sendJson(res, err.status, { error: { code: err.code, message: err.message } });
       return;
@@ -105,18 +105,26 @@ export interface JsonServerOptions {
   routes: Record<string, RouteHandler>;
   port: number;
   host?: string;
+  /** Max request body in bytes, a non-negative integer. Default 32 MiB. */
   maxBodyBytes?: number;
   onError?: (err: Error) => void;
 }
 
 /**
- * Minimal JSON-over-POST HTTP server for the in-guest agent. All handlers
- * receive the parsed JSON body and may return a JSON-serializable value
- * (or write the response themselves and return undefined).
+ * JSON-over-POST HTTP server for the in-guest agent, built on node:http
+ * alone. All handlers receive the parsed JSON body and may return a
+ * JSON-serializable value (or write the response themselves and return
+ * undefined).
  * Route keys are "METHOD /path"; a key ending in "/*" matches any path
  * under that prefix and passes the remainder to the handler.
  */
 export function startJsonServer(opts: JsonServerOptions): Server {
+  const maxBodyBytes = opts.maxBodyBytes ?? BODY_LIMIT;
+  // NaN or Infinity never trips `size > maxBytes`: bodies would buffer
+  // without limit. Throw like listen() does for a bad port.
+  if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 0) {
+    throw new RangeError(`maxBodyBytes must be a non-negative integer, got ${maxBodyBytes}`);
+  }
   const server = createServer(async (req, res) => {
     // A client aborting mid-flush (or closeAllConnections) emits 'error' on
     // the response after our write returns — an unhandled 'error' would be
@@ -155,10 +163,18 @@ export function startJsonServer(opts: JsonServerOptions): Server {
       let bodyTimer: NodeJS.Timeout | undefined;
       try {
         body = (await Promise.race([
-          readJsonBody(req, opts.maxBodyBytes ?? BODY_LIMIT),
+          readJsonBody(req, maxBodyBytes),
           new Promise<never>((_, reject) => {
             bodyTimer = setTimeout(() => {
-              req.destroy();
+              // Answer, then close: destroying the request here would drop
+              // the socket before sendError writes the 408. `Connection:
+              // close` makes Node end the socket once the reply is flushed;
+              // the cap covers a client that never reads it.
+              res.setHeader("connection", "close");
+              const socket = req.socket;
+              const cap = setTimeout(() => socket.destroy(), 5_000);
+              cap.unref();
+              socket.once("close", () => clearTimeout(cap));
               reject(new HttpError(408, "request body timed out"));
             }, 60_000);
             bodyTimer.unref();

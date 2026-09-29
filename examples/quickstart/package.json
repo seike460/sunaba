@@ -4,10 +4,11 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "start": "tsx src/main.ts"
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "sunaba-sdk": "^0.1.0"
+    "sunaba-sdk": "^0.1.2"
   },
   "devDependencies": {
     "tsx": "^4.20.0",

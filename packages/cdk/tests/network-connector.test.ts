@@ -1,9 +1,16 @@
 import { App, aws_ec2 as ec2, aws_iam as iam, Stack } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
-import { MicrovmNetworkConnector } from "../src/index.js";
+import {
+  type IMicrovmNetworkConnector,
+  MicrovmNetworkConnector,
+  type NetworkProtocol,
+  resolveConnectorArns,
+} from "../src/index.js";
 
-function stackWithConnector(props?: Partial<Parameters<typeof MicrovmNetworkConnector>[2]>) {
+function stackWithConnector(
+  props?: Partial<ConstructorParameters<typeof MicrovmNetworkConnector>[2]>,
+) {
   const app = new App();
   const stack = new Stack(app, "TestStack");
   const vpc = new ec2.Vpc(stack, "Vpc", { maxAzs: 2 });
@@ -116,8 +123,12 @@ describe("MicrovmNetworkConnector", () => {
   });
 
   it("exposes the connector ARN and satisfies the image ref interface", () => {
-    const { connector } = stackWithConnector();
-    expect(connector.connectorArn).toBeDefined();
+    const { stack, connector, template } = stackWithConnector();
+    const [connectorId] = Object.keys(template.findResources("AWS::Lambda::NetworkConnector"));
+    const arn = stack.resolve(connector.connectorArn);
+    expect(JSON.stringify(arn)).toContain(`"${connectorId}"`);
+    const ref: IMicrovmNetworkConnector = connector;
+    expect(stack.resolve(resolveConnectorArns(stack, [ref]))).toEqual([arn]);
   });
 
   it("connector resource depends on the operator role's policies", () => {
@@ -130,7 +141,7 @@ describe("MicrovmNetworkConnector", () => {
     expect(connector.DependsOn).toEqual(expect.arrayContaining(roleIds));
   });
 
-  it("rejects invalid names and too many security groups", () => {
+  it("rejects invalid names, too many security groups and unknown protocols", () => {
     const app = new App();
     const stack = new Stack(app, "T");
     const vpc = isolatedVpc(stack);
@@ -144,5 +155,34 @@ describe("MicrovmNetworkConnector", () => {
     expect(
       () => new MicrovmNetworkConnector(stack, "C2", { vpc, subnets: ISO, securityGroups: sgs }),
     ).toThrow(/5 security groups/);
+    expect(
+      () =>
+        new MicrovmNetworkConnector(stack, "C3", {
+          vpc,
+          subnets: ISO,
+          networkProtocol: "IPv6" as NetworkProtocol,
+        }),
+    ).toThrow(/networkProtocol/);
+  });
+
+  it("requires between 1 and 16 subnets", () => {
+    const app = new App();
+    const stack = new Stack(app, "T");
+    const vpc = isolatedVpc(stack);
+    const subnets = Array.from({ length: 17 }, (_, i) =>
+      ec2.Subnet.fromSubnetId(stack, `Subnet${i}`, `subnet-${String(i).padStart(8, "0")}`),
+    );
+    expect(
+      () => new MicrovmNetworkConnector(stack, "C0", { vpc, subnets: { subnets: [] } }),
+    ).toThrow(/between 1 and 16 subnets/);
+    expect(() => new MicrovmNetworkConnector(stack, "C17", { vpc, subnets: { subnets } })).toThrow(
+      /between 1 and 16 subnets/,
+    );
+    new MicrovmNetworkConnector(stack, "C16", { vpc, subnets: { subnets: subnets.slice(0, 16) } });
+    const resources = Template.fromStack(stack).findResources("AWS::Lambda::NetworkConnector");
+    const cfg = Object.values(resources)[0]?.Properties?.Configuration?.VpcEgressConfiguration as {
+      SubnetIds?: unknown[];
+    };
+    expect(cfg?.SubnetIds).toHaveLength(16);
   });
 });

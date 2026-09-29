@@ -35,11 +35,21 @@ export type ManagedEgressConnector =
 
 const MANAGED_INFIX = ":aws:network-connector:aws-network-connector:";
 
-/** AWS partition for a region — commercial "aws" unless gov/cn. */
+// Region prefixes of the non-commercial partitions (the regionRegex
+// entries of the AWS SDK's partitions table).
+const PARTITION_PREFIXES: readonly (readonly [string, string])[] = [
+  ["us-gov-", "aws-us-gov"],
+  ["cn-", "aws-cn"],
+  ["us-iso-", "aws-iso"],
+  ["us-isob-", "aws-iso-b"],
+  ["eu-isoe-", "aws-iso-e"],
+  ["us-isof-", "aws-iso-f"],
+  ["eusc-", "aws-eusc"],
+];
+
+/** AWS partition for a region — commercial "aws" unless a prefix above matches. */
 export function partitionForRegion(region: string): string {
-  if (region.startsWith("us-gov-")) return "aws-us-gov";
-  if (region.startsWith("cn-")) return "aws-cn";
-  return "aws";
+  return PARTITION_PREFIXES.find(([prefix]) => region.startsWith(prefix))?.[1] ?? "aws";
 }
 
 /** Managed connector names are uppercase constants like ALL_INGRESS. */
@@ -51,8 +61,9 @@ export function isManagedConnectorName(value: string): boolean {
 
 /**
  * Resolves a connector reference to an ARN. Managed connector names
- * (ALL_INGRESS, NO_INGRESS, SHELL_INGRESS, INTERNET_EGRESS) are expanded
- * to their regional managed ARN; full ARNs pass through unchanged.
+ * (HTTP_INGRESS, SHELL_INGRESS, ALL_INGRESS, NO_INGRESS, INTERNET_EGRESS)
+ * are expanded to their regional managed ARN; full ARNs pass through
+ * unchanged.
  */
 export function connectorArn(ref: string, region?: string): string {
   if (ref.startsWith("arn:")) return ref;

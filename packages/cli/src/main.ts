@@ -22,16 +22,21 @@ const USAGE = `sunaba — sandbox tooling for AWS Lambda MicroVMs
 usage: sunaba <command> [flags] [-- args]
 
 commands:
-  init      scaffold sunaba.json + Dockerfile in the current directory
-  build     build a MicroVM image (--dir|--zip|--s3-uri, --name, --bucket, --role)
-  run       launch a sandbox (--image, --image-version, --shell, --exec|-- <cmd>, --rm)
-  exec      run a command in a MicroVM:  sunaba exec <id> -- <cmd...>
+  init      scaffold sunaba.json + Dockerfile in the current directory (--name)
+  build     build a MicroVM image (--dir|--zip|--s3-uri, --name, --bucket, --role,
+            --base-image, --base-version, --memory MiB, --description, --timeout ms)
+  run       launch a sandbox (--image, --image-version, --shell, --exec|-- <cmd>, --rm,
+            --role <execution role>, --payload <run hook payload>,
+            --max-duration secs, --idle secs, --suspended secs, --no-auto-resume,
+            --timeout ms for the command, --run-timeout ms to reach RUNNING)
+  exec      run a command in a MicroVM:  sunaba exec <id> [--timeout ms] -- <cmd...>
+                                         (or --exec "<cmd>" in place of -- <cmd...>)
   shell     interactive shell:           sunaba shell <id>
-  ls        list MicroVMs (--all includes TERMINATED, --image-version)
+  ls        list MicroVMs (--all includes TERMINATED, --image, --image-version)
   images    list MicroVM images
   status    show one MicroVM:            sunaba status <id>
-  suspend   suspend MicroVMs:            sunaba suspend <id>...
-  resume    resume MicroVMs:             sunaba resume <id>...
+  suspend   suspend MicroVMs:            sunaba suspend <id>... [--timeout ms]
+  resume    resume MicroVMs:             sunaba resume <id>... [--timeout ms]
   rm        terminate MicroVMs:          sunaba rm <id>...
   logs      CloudWatch logs:             sunaba logs <id> [--group g] [--follow] [--tail n]
 
@@ -64,8 +69,9 @@ async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   const name = args._[0];
   const rest: typeof args = { ...args, _: args._.slice(1) };
-  // Bare `--version` prints the CLI version; image versions use the
-  // distinct `--image-version` flag (no collision).
+  // Only a bare top-level `--version` prints the CLI version. After a
+  // command it is that command's flag: `run`/`ls` still take `--version <v>`
+  // as an undocumented alias of `--image-version` (shipped in 0.1.0).
   // Direct flag checks — flagBool would throw on "--version x" before the
   // error handler below.
   const wantVersion = args.flags.version === true || args.flags.version === "true";

@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { checkNumber } from "../util.js";
 
 /**
  * Lifecycle hook contract for Lambda MicroVMs.
@@ -50,15 +51,24 @@ export interface HooksServerOptions {
   host?: string;
   /** Called on listen errors (e.g. EADDRINUSE) instead of crashing. */
   onError?: (err: Error) => void;
-  /** Max accepted body size in bytes. Default 1 MiB. */
+  /**
+   * Max accepted body size in bytes, a non-negative integer (else a
+   * SunabaError "BadMaxBodyBytes"). Default 1 MiB.
+   */
   maxBodyBytes?: number;
 }
 
 /**
- * Starts a tiny HTTP server implementing the MicroVM lifecycle hooks.
+ * Starts a node:http server that implements the MicroVM lifecycle hooks.
  * Returns the Server (caller may also keep a reference for shutdown).
+ * A handler that throws gets 503 (the error goes to console.error); a
+ * body that isn't valid JSON gets 400 without invoking the handler.
  */
 export function startHooksServer(handlers: HooksHandlers, opts: HooksServerOptions = {}): Server {
+  const maxBodyBytes = opts.maxBodyBytes ?? 1_048_576;
+  // NaN or Infinity never trips `size > maxBytes`: bodies would buffer
+  // without limit.
+  checkNumber(maxBodyBytes, "maxBodyBytes", "BadMaxBodyBytes", { min: 0, integer: true });
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     // A malformed Host header makes `new URL` throw — answer 400, never crash.
     let url: URL;
@@ -80,13 +90,22 @@ export function startHooksServer(handlers: HooksHandlers, opts: HooksServerOptio
       res.writeHead(200).end();
       return;
     }
+    let body: unknown;
     try {
-      const body = await readJson(req, opts.maxBodyBytes ?? 1_048_576);
-      await handler(body);
-      res.writeHead(200).end();
+      body = await readJson(req, maxBodyBytes);
     } catch (e) {
-      res.writeHead(e instanceof BodyTooLarge ? 413 : 503).end();
+      const status = e instanceof BodyTooLarge ? 413 : e instanceof InvalidJson ? 400 : 503;
+      res.writeHead(status).end();
+      return;
     }
+    try {
+      await handler(body);
+    } catch (e) {
+      res.writeHead(503).end();
+      console.error("[sunaba-hooks]", `hook ${name} failed:`, e);
+      return;
+    }
+    res.writeHead(200).end();
   });
   server.on("error", (e) => {
     if (opts.onError) opts.onError(e);
@@ -97,6 +116,7 @@ export function startHooksServer(handlers: HooksHandlers, opts: HooksServerOptio
 }
 
 class BodyTooLarge extends Error {}
+class InvalidJson extends Error {}
 
 async function readJson(req: IncomingMessage, maxBytes: number): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -115,6 +135,6 @@ async function readJson(req: IncomingMessage, maxBytes: number): Promise<unknown
   try {
     return JSON.parse(text);
   } catch {
-    return {};
+    throw new InvalidJson("hook body is not valid JSON");
   }
 }

@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { Sandbox } from "sunaba-sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { flagBool, flagInt, flagStr, parseArgs } from "../src/args.js";
 import {
@@ -18,7 +19,7 @@ import {
   cmdStatus,
   cmdSuspend,
 } from "../src/commands.js";
-import { loadConfig } from "../src/config.js";
+import { loadConfig, writeConfig } from "../src/config.js";
 
 // A default-constructed LambdaMicrovmsClient is only reached through the
 // regionOf fallback — every other path injects ctx.client. Its region
@@ -65,7 +66,7 @@ class FakeClient {
       (x) =>
         x.cmd === name && (!x.input || Object.entries(x.input).every(([k, v]) => input[k] === v)),
     );
-    if (f !== -1) throw this.failures.splice(f, 1)[0].err;
+    if (f !== -1) throw this.failures.splice(f, 1)[0]?.err;
     switch (name) {
       case "ListMicrovmImagesCommand":
         return { items: [{ name: "demo", imageArn: ARN }] };
@@ -144,6 +145,20 @@ function ctx(lines: string[] = [], extra: Partial<CliContext> = {}, state = "RUN
   };
 }
 
+/** Advance fake timers until `p` settles — for code that sleeps between polls. */
+async function runTimersUntilSettled(p: Promise<unknown>): Promise<void> {
+  let settled = false;
+  void p.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  for (let i = 0; i < 1_000 && !settled; i++) await vi.advanceTimersByTimeAsync(1_000);
+}
+
 describe("parseArgs", () => {
   it("parses flags, values, positionals and --", () => {
     const a = parseArgs(["exec", "m-1", "--timeout", "5000", "--json", "--", "ls", "-la"]);
@@ -163,6 +178,16 @@ describe("parseArgs", () => {
     const a = parseArgs(["--timeout", "abc"]);
     expect(() => flagInt(a, "timeout", { min: 0, max: 10 })).toThrow();
   });
+
+  it.each(["NaN", "Infinity", "-1", "1.5", "", " ", "1e3", "0x10", "1e999"])(
+    "flagInt rejects --timeout=%s",
+    (value) => {
+      const a = parseArgs([`--timeout=${value}`]);
+      expect(() => flagInt(a, "timeout", { min: 0, max: 99_999 })).toThrow(
+        "--timeout must be an integer in 0..99999",
+      );
+    },
+  );
 
   it("flagBool rejects a swallowed positional (--rm myname)", () => {
     const a = parseArgs(["--rm", "myname"]);
@@ -189,11 +214,18 @@ describe("init", () => {
     expect(cfg.name).toBe(path.basename(dir));
     expect(cfg.baseImage).toBe("al2023-1");
     const dockerfile = readFileSync(path.join(dir, "Dockerfile"), "utf8");
-    // The agent is OPTIONAL — mentioned but commented out until published;
-    // never COPY a directory init doesn't create.
+    // The agent is OPTIONAL — shown commented out; never COPY a directory
+    // init doesn't create.
     expect(dockerfile).toContain("sunaba-agent");
     expect(dockerfile).not.toMatch(/^RUN npm install -g sunaba-agent$/m);
     expect(dockerfile).not.toContain("COPY sunaba-agent/");
+    expect(dockerfile).toMatch(/^#\s+RUN npm install -g sunaba-agent$/m);
+    // Installing the agent without starting it serves nothing — the
+    // commented recipe must include the command that runs it.
+    expect(dockerfile).toMatch(/^#\s+CMD \["sunaba-agentd"\]$/m);
+    // init users installed from npm: no steps that need a sunaba checkout.
+    expect(dockerfile).not.toContain("npm pack");
+    expect(dockerfile).not.toContain("once published");
     expect(JSON.parse(readFileSync(path.join(dir, "sunaba.json"), "utf8")).sourceDir).toBe(".");
   });
 
@@ -210,7 +242,8 @@ describe("init", () => {
     const { client, context, lines } = ctx([], { cwd: dir });
     await cmdRun(parseArgs(["--image", "demo", "--json"]), context);
     const run = client.callsOf("RunMicrovmCommand")[0];
-    expect(run.input.executionRoleArn).toBeUndefined();
+    expect(run).toBeDefined();
+    expect(run?.input.executionRoleArn).toBeUndefined();
     expect(
       JSON.parse(lines.find((l) => l.startsWith("{")) ?? "{}").executionRoleArn,
     ).toBeUndefined();
@@ -249,28 +282,29 @@ describe("build", () => {
     );
     expect(code).toBe(0);
     const create = client.callsOf("CreateMicrovmImageCommand")[0];
-    expect(create.input.name).toBe("demo");
-    expect(create.input.buildRoleArn).toBe("arn:aws:iam::123456789012:role/build");
+    expect(create?.input.name).toBe("demo");
+    expect(create?.input.buildRoleArn).toBe("arn:aws:iam::123456789012:role/build");
     expect(lines[0]).toContain(`built ${ARN}`);
   });
 
-  it("takes name/role/bucket from sunaba.json", async () => {
+  it("takes name/role from sunaba.json", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "sunaba-cli-"));
-    const { writeConfig } = await import("../src/config.js");
-    writeConfig(
-      {
+    try {
+      writeConfig(
+        { name: "cfg-name", sourceDir: ".", buildRoleArn: "arn:aws:iam::123456789012:role/r" },
+        dir,
+      );
+      const { client, context } = ctx([], { cwd: dir });
+      // --s3-uri bypasses the S3 upload path, so no artifact bucket is used.
+      const code = await cmdBuild(parseArgs(["--s3-uri", "s3://bkt/app.zip"]), context);
+      expect(code).toBe(0);
+      expect(client.callsOf("CreateMicrovmImageCommand")[0]?.input).toMatchObject({
         name: "cfg-name",
-        sourceDir: ".",
         buildRoleArn: "arn:aws:iam::123456789012:role/r",
-        artifactBucket: "bkt",
-      },
-      dir,
-    );
-    const { context } = ctx([], { cwd: dir });
-    // --s3-uri bypasses the S3 upload path which needs a real bucket.
-    const code = await cmdBuild(parseArgs(["--s3-uri", "s3://bkt/app.zip"]), context);
-    expect(code).toBe(0);
-    rmSync(dir, { recursive: true, force: true });
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("rejects missing role", async () => {
@@ -300,7 +334,9 @@ describe("build", () => {
       expect(code).toBe(0);
       // Managed-name expansion proves the mocked default client's region.
       const create = client.callsOf("CreateMicrovmImageCommand")[0];
-      expect(create.input.baseImageArn).toBe("arn:aws:lambda:us-west-2:aws:microvm-image:al2023-1");
+      expect(create?.input.baseImageArn).toBe(
+        "arn:aws:lambda:us-west-2:aws:microvm-image:al2023-1",
+      );
     } finally {
       vi.unstubAllEnvs();
     }
@@ -399,18 +435,28 @@ describe("run", () => {
     expect(lines[0]).toContain("m-1");
     expect(lines[0]).toContain("e.lambda-microvm.on.aws");
     const run = client.callsOf("RunMicrovmCommand")[0];
-    expect(run.input.imageIdentifier).toBe(ARN);
-    expect(run.input.imageVersion).toBe("1.0");
+    expect(run?.input.imageIdentifier).toBe(ARN);
+    expect(run?.input.imageVersion).toBe("1.0");
+  });
+
+  it("attaches the managed HTTP_INGRESS + SHELL_INGRESS connectors (never ALL_INGRESS)", async () => {
+    const { client, context } = ctx();
+    await cmdRun(parseArgs(["--image", "demo"]), context);
+    // RunMicrovm rejects ALL_INGRESS combined with any other ingress connector.
+    expect(client.callsOf("RunMicrovmCommand")[0]?.input.ingressNetworkConnectors).toEqual([
+      "arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:HTTP_INGRESS",
+      "arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:SHELL_INGRESS",
+    ]);
   });
 
   it("--image-version pins the version; --version works as a compat alias", async () => {
     const { client, context } = ctx();
     await cmdRun(parseArgs(["--image", "demo", "--image-version", "9.9"]), context);
-    expect(client.callsOf("RunMicrovmCommand")[0].input.imageVersion).toBe("9.9");
+    expect(client.callsOf("RunMicrovmCommand")[0]?.input.imageVersion).toBe("9.9");
 
     const c2 = ctx();
     await cmdRun(parseArgs(["--image", "demo", "--version", "8.8"]), c2.context);
-    expect(c2.client.callsOf("RunMicrovmCommand")[0].input.imageVersion).toBe("8.8");
+    expect(c2.client.callsOf("RunMicrovmCommand")[0]?.input.imageVersion).toBe("8.8");
 
     // --image-version wins when both are present.
     const c3 = ctx();
@@ -418,13 +464,13 @@ describe("run", () => {
       parseArgs(["--image", "demo", "--image-version", "7.7", "--version", "8.8"]),
       c3.context,
     );
-    expect(c3.client.callsOf("RunMicrovmCommand")[0].input.imageVersion).toBe("7.7");
+    expect(c3.client.callsOf("RunMicrovmCommand")[0]?.input.imageVersion).toBe("7.7");
   });
 
   it("--json emits only safe public fields (no client/token internals)", async () => {
     const { context, lines } = ctx();
     await cmdRun(parseArgs(["--image", "demo", "--json"]), context);
-    const out = JSON.parse(lines[0]);
+    const out = JSON.parse(lines[0] ?? "");
     expect(out.microvmId).toBe("m-1");
     // The real API returns a bare host; the SDK prepends https:// itself.
     expect(out.endpoint).toBe("e.lambda-microvm.on.aws");
@@ -441,11 +487,31 @@ describe("run", () => {
     expect(Object.keys(out).every((k) => allowed.has(k))).toBe(true);
   });
 
+  it("--json with a command prints the exec result as JSON, not raw output", async () => {
+    const exec = vi.spyOn(Sandbox.prototype, "exec").mockResolvedValue({
+      output: "hi\n",
+      exitCode: 3,
+    });
+    try {
+      for (const argv of [
+        ["--image", "demo", "--json", "--", "echo", "hi"],
+        ["--image", "demo", "--json", "--exec", "echo hi"],
+      ]) {
+        const { context, lines } = ctx();
+        expect(await cmdRun(parseArgs(argv), context)).toBe(3);
+        const out = lines.filter((l) => !l.startsWith("ERR ")).map((l) => JSON.parse(l));
+        expect(out).toEqual([{ microvmId: "m-1", output: "hi\n", exitCode: 3 }]);
+      }
+    } finally {
+      exec.mockRestore();
+    }
+  });
+
   it("--no-auto-resume alone produces an idlePolicy with autoResumeEnabled=false", async () => {
     const { client, context } = ctx();
     await cmdRun(parseArgs(["--image", "demo", "--no-auto-resume"]), context);
     const run = client.callsOf("RunMicrovmCommand")[0];
-    expect(run.input.idlePolicy).toMatchObject({ autoResumeEnabled: false });
+    expect(run?.input.idlePolicy).toMatchObject({ autoResumeEnabled: false });
   });
 
   it("rejects stray positional arguments", async () => {
@@ -481,13 +547,6 @@ describe("run", () => {
       /requires a value/,
     );
     expect(client.callsOf("RunMicrovmCommand")).toHaveLength(0);
-  });
-
-  it("suspend/resume accept --timeout to extend the state wait", async () => {
-    const { client, context } = ctx();
-    const code = await cmdSuspend(parseArgs(["m-1", "--timeout", "5000"]), context);
-    expect(code).toBe(0);
-    expect(client.callsOf("SuspendMicrovmCommand")).toHaveLength(1);
   });
 
   it("rejects --exec together with a -- command", async () => {
@@ -638,7 +697,7 @@ describe("run", () => {
       expect(runSent).toBe(true);
       const added = process.listeners("SIGINT").filter((l) => !before.includes(l));
       expect(added).toHaveLength(1);
-      added[0](); // SIGINT while vmId is still unknown
+      added[0]?.("SIGINT"); // SIGINT while vmId is still unknown
       await new Promise((r) => setTimeout(r, 20));
       // Must NOT exit — the pending RunMicrovm may have created a VM.
       expect(exits).toHaveLength(0);
@@ -676,8 +735,7 @@ describe("validation & config", () => {
     );
   });
 
-  it("loadConfig rejects malformed configs with clear errors", async () => {
-    const { writeFileSync } = await import("node:fs");
+  it("loadConfig rejects malformed configs with clear errors", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "sunaba-cli-"));
     writeFileSync(path.join(dir, "sunaba.json"), JSON.stringify({ name: 123 }));
     expect(() => loadConfig(dir)).toThrow(/"name" must be a string/);
@@ -736,17 +794,17 @@ describe("list & status", () => {
     const { client, context } = ctx();
     await cmdLs(parseArgs(["--image", "demo"]), context);
     const list = client.callsOf("ListMicrovmsCommand")[0];
-    expect(list.input.imageIdentifier).toBe(ARN);
+    expect(list?.input.imageIdentifier).toBe(ARN);
   });
 
   it("ls accepts --image-version and the --version compat alias", async () => {
     const { client, context } = ctx();
     await cmdLs(parseArgs(["--image-version", "2.0"]), context);
-    expect(client.callsOf("ListMicrovmsCommand")[0].input.imageVersion).toBe("2.0");
+    expect(client.callsOf("ListMicrovmsCommand")[0]?.input.imageVersion).toBe("2.0");
 
     const c2 = ctx();
     await cmdLs(parseArgs(["--version", "3.0"]), c2.context);
-    expect(c2.client.callsOf("ListMicrovmsCommand")[0].input.imageVersion).toBe("3.0");
+    expect(c2.client.callsOf("ListMicrovmsCommand")[0]?.input.imageVersion).toBe("3.0");
   });
 });
 
@@ -761,6 +819,7 @@ describe("logs", () => {
         logStreamNamePrefix?: string;
         logStreamName?: string;
         nextToken?: string;
+        limit?: number;
       };
       switch (name) {
         case "DescribeLogGroupsCommand":
@@ -813,8 +872,8 @@ describe("logs", () => {
     // Pages: initial + repeated-token probe, then stops.
     const gets = fake.inputs("GetLogEventsCommand");
     expect(gets).toHaveLength(2);
-    expect(gets[1].nextToken).toBe("f2");
-    expect(gets[0].logGroupName).toBe("/aws/lambda-microvms/");
+    expect(gets[1]?.nextToken).toBe("f2");
+    expect(gets[0]?.logGroupName).toBe("/aws/lambda-microvms/");
     // Over-matching "m-10-impostor" streams must be filtered out.
     expect(gets.every((g) => g.logStreamName === "m-1")).toBe(true);
     expect(lines.map((l) => l.replace(/^\S+ /, ""))).toEqual(["a", "b"]);
@@ -832,7 +891,7 @@ describe("logs", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("b");
     // Backward fetch used limit, not a full forward drain.
-    expect(fake.inputs("GetLogEventsCommand")[0].limit).toBe(1);
+    expect(fake.inputs("GetLogEventsCommand")[0]?.limit).toBe(1);
   });
 
   it("errors when no streams match", async () => {
@@ -852,6 +911,119 @@ describe("logs", () => {
     await expect(cmdLogs(parseArgs(["m-1", "extra"]), { region: "us-east-1" })).rejects.toThrow(
       /unexpected arguments/,
     );
+  });
+
+  it("the usage error lists --tail with the other logs flags", async () => {
+    await expect(cmdLogs(parseArgs([]), { region: "us-east-1" })).rejects.toThrow(
+      /\[--group name\] \[--follow\] \[--tail n\]/,
+    );
+  });
+
+  /** Managed groups whose DescribeLogStreams can fail per group. */
+  class ProbeFailLogs extends FakeLogs {
+    constructor(
+      private groups: string[],
+      private failFor: (group: string) => Error | undefined,
+    ) {
+      super();
+    }
+    override async send(command: unknown): Promise<unknown> {
+      const name = (command as { constructor: { name: string } }).constructor.name;
+      const input = (command as { input: { logGroupName?: string } }).input;
+      if (name === "DescribeLogGroupsCommand") {
+        this.calls.push(command);
+        return { logGroups: this.groups.map((logGroupName) => ({ logGroupName })) };
+      }
+      const err =
+        name === "DescribeLogStreamsCommand" ? this.failFor(input.logGroupName ?? "") : undefined;
+      if (err) {
+        this.calls.push(command);
+        throw err;
+      }
+      return super.send(command);
+    }
+  }
+  const awsError = (name: string, message: string) => Object.assign(new Error(message), { name });
+
+  it("surfaces a stream probe failure instead of 'no log streams'", async () => {
+    // AccessDenied/throttling must not read as "this MicroVM has no logs".
+    const fake = new ProbeFailLogs(["/aws/lambda-microvms/demo"], () =>
+      awsError("AccessDeniedException", "not authorized to perform: logs:DescribeLogStreams"),
+    );
+    await expect(
+      cmdLogs(parseArgs(["m-1"]), { region: "us-east-1", logsClient: fake }),
+    ).rejects.toThrow(/not authorized/);
+  });
+
+  it("a probe failure in one group doesn't hide the streams found in another", async () => {
+    // Least-privilege IAM may allow DescribeLogStreams on some groups only.
+    const fake = new ProbeFailLogs(
+      ["/aws/lambda-microvms/demo", "/aws/lambda-microvms/denied"],
+      (g) =>
+        g.endsWith("/denied") ? awsError("AccessDeniedException", "not authorized") : undefined,
+    );
+    const lines: string[] = [];
+    const code = await cmdLogs(parseArgs(["m-1"]), {
+      region: "us-east-1",
+      logsClient: fake,
+      out: (l) => lines.push(l),
+    });
+    expect(code).toBe(0);
+    expect(lines.map((l) => l.replace(/^\S+ /, ""))).toEqual(["a", "b"]);
+  });
+
+  it("treats a group deleted mid-scan as having no streams", async () => {
+    const fake = new ProbeFailLogs(["/aws/lambda-microvms/demo"], () =>
+      awsError("ResourceNotFoundException", "The specified log group does not exist."),
+    );
+    const lines: string[] = [];
+    const code = await cmdLogs(parseArgs(["m-1"]), {
+      region: "us-east-1",
+      logsClient: fake,
+      err: (l) => lines.push(l),
+    });
+    expect(code).toBe(1);
+    expect(lines[0]).toContain("no log streams matching m-1");
+  });
+
+  it("surfaces a GetMicrovm failure when the fallback scan finds no streams", async () => {
+    // The image lookup failing (AccessDenied, network) must not read as
+    // "this MicroVM has no logs" either.
+    const { context, client } = ctx();
+    client.failOnce(
+      "GetMicrovmCommand",
+      awsError("AccessDeniedException", "not authorized: GetMicrovm"),
+    );
+    await expect(
+      cmdLogs(parseArgs(["nope"]), { ...context, logsClient: new FakeLogs() }),
+    ).rejects.toThrow(/not authorized: GetMicrovm/);
+  });
+
+  it("surfaces a GetMicrovm failure instead of 'no log group' when none is listed", async () => {
+    const { context, client } = ctx();
+    client.failOnce(
+      "GetMicrovmCommand",
+      awsError("AccessDeniedException", "not authorized: GetMicrovm"),
+    );
+    await expect(
+      cmdLogs(parseArgs(["m-1"]), {
+        ...context,
+        logsClient: new ProbeFailLogs([], () => undefined),
+      }),
+    ).rejects.toThrow(/not authorized: GetMicrovm/);
+  });
+
+  it("a failed GetMicrovm still falls back to scanning every managed group", async () => {
+    const { context, client } = ctx();
+    client.failOnce("GetMicrovmCommand", awsError("AccessDeniedException", "not authorized"));
+    const lines: string[] = [];
+    const code = await cmdLogs(parseArgs(["m-1"]), {
+      ...context,
+      logsClient: new FakeLogs(),
+      out: (l) => lines.push(l),
+    });
+    expect(code).toBe(0);
+    expect(lines.map((l) => l.replace(/^\S+ /, ""))).toEqual(["a", "b"]);
   });
 
   it("prefers the VM's image-specific log group over unrelated groups", async () => {
@@ -893,7 +1065,7 @@ describe("logs", () => {
       out: (l) => lines.push(l),
     });
     expect(code).toBe(0);
-    expect(fake.inputs("GetLogEventsCommand")[0].logGroupName).toBe("/aws/lambda-microvms/demo");
+    expect(fake.inputs("GetLogEventsCommand")[0]?.logGroupName).toBe("/aws/lambda-microvms/demo");
     expect(lines[0]).toContain("found");
   });
 
@@ -911,6 +1083,123 @@ describe("logs", () => {
     expect(fake.inputs("GetLogEventsCommand").every((g) => g.logGroupName === "custom-group")).toBe(
       true,
     );
+  });
+
+  it("drops terminal control sequences from log messages", async () => {
+    // Messages are written by code inside the sandbox — they must not
+    // reach the viewer's terminal as escape sequences.
+    class HostileLogs extends FakeLogs {
+      override async send(command: unknown): Promise<unknown> {
+        const name = (command as { constructor: { name: string } }).constructor.name;
+        if (name !== "GetLogEventsCommand") return super.send(command);
+        this.calls.push(command);
+        const { nextToken } = (command as { input: { nextToken?: string } }).input;
+        const message = "\u001b]0;title\u0007\u001b[31mred\u001b[0m\ttab\r\nnext\u009b2Jend";
+        return { events: nextToken ? [] : [{ timestamp: 1, message }], nextForwardToken: "f1" };
+      }
+    }
+    const lines: string[] = [];
+    const code = await cmdLogs(parseArgs(["m-1", "--group", "g"]), {
+      region: "us-east-1",
+      logsClient: new HostileLogs(),
+      out: (l) => lines.push(l),
+    });
+    expect(code).toBe(0);
+    expect(lines).toEqual(["1970-01-01T00:00:00.001Z ]0;titlered\ttab\nnext2Jend"]);
+  });
+
+  /** GetLogEvents answers from a script, one step per call. */
+  class ScriptedLogs extends FakeLogs {
+    constructor(
+      private script: (Error | { events: { message: string }[]; nextForwardToken: string })[],
+    ) {
+      super();
+    }
+    override async send(command: unknown): Promise<unknown> {
+      const name = (command as { constructor: { name: string } }).constructor.name;
+      if (name !== "GetLogEventsCommand") return super.send(command);
+      this.calls.push(command);
+      const step = this.script.shift() ?? new Error("script exhausted");
+      if (step instanceof Error) throw step;
+      return step;
+    }
+  }
+  const page = (nextForwardToken: string, ...messages: string[]) => ({
+    events: messages.map((message) => ({ message })),
+    nextForwardToken,
+  });
+
+  /** Run `logs --follow` until the script's final non-transient error stops it. */
+  async function follow(fake: FakeLogs): Promise<string[]> {
+    const lines: string[] = [];
+    vi.useFakeTimers();
+    try {
+      const run = cmdLogs(parseArgs(["m-1", "--group", "g", "--follow"]), {
+        region: "us-east-1",
+        logsClient: fake,
+        out: (l) => lines.push(l.replace(/^\S+ /, "")),
+        err: (l) => lines.push(`ERR ${l}`),
+      });
+      const stopped = expect(run).rejects.toThrow(/not authorized/);
+      await runTimersUntilSettled(run);
+      await stopped;
+    } finally {
+      vi.useRealTimers();
+    }
+    return lines;
+  }
+
+  it("--follow prints the backlog, then polls from the saved token for new events", async () => {
+    const fake = new ScriptedLogs([
+      page("f1", "a"),
+      awsError("ThrottlingException", "Rate exceeded"),
+      page("f2", "b"),
+      page("f2"),
+      page("f2"),
+      page("f3", "c"),
+      page("f3"),
+      awsError("ThrottlingException", "Rate exceeded"),
+      awsError("AccessDeniedException", "not authorized"),
+    ]);
+    expect(await follow(fake)).toEqual([
+      "a",
+      "ERR warning: Rate exceeded — retrying",
+      "b",
+      "c",
+      "ERR warning: Rate exceeded — retrying",
+    ]);
+    // Backlog (retrying f1 once), then every poll resumes from the last
+    // token — nothing is printed twice.
+    expect(fake.inputs("GetLogEventsCommand").map((g) => g.nextToken)).toEqual([
+      undefined,
+      "f1",
+      "f1",
+      "f2",
+      "f2",
+      "f2",
+      "f3",
+      "f3",
+      "f3",
+    ]);
+  });
+
+  it("--follow stops retrying a backlog page after 5 transient errors and keeps polling", async () => {
+    const throttled = () => awsError("ThrottlingException", "Rate exceeded");
+    const fake = new ScriptedLogs([
+      throttled(),
+      throttled(),
+      throttled(),
+      throttled(),
+      throttled(),
+      page("f1", "a"),
+      page("f1"),
+      awsError("AccessDeniedException", "not authorized"),
+    ]);
+    expect(await follow(fake)).toEqual([
+      ...Array(5).fill("ERR warning: Rate exceeded — retrying"),
+      "ERR warning: giving up on backlog for m-1 — following live",
+      "a",
+    ]);
   });
 });
 
@@ -976,7 +1265,44 @@ describe("lifecycle", () => {
   it("rm waits out SUSPENDING before terminating", async () => {
     const { client, context } = ctx([], {}, "SUSPENDING");
     expect(await cmdRm(parseArgs(["m-1"]), context)).toBe(0);
-    expect(client.callsOf("TerminateMicrovmCommand")).toHaveLength(1);
+    // The fake reports SUSPENDING once: Terminate must follow the poll
+    // that saw SUSPENDED, not the first read.
+    expect(
+      client.calls.map((c) => (c as { constructor: { name: string } }).constructor.name),
+    ).toEqual(["GetMicrovmCommand", "GetMicrovmCommand", "TerminateMicrovmCommand"]);
+  });
+
+  it("suspend/resume pass --timeout to the state wait", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const [cmd, verb, state] of [
+        [cmdSuspend, "suspend", "RUNNING"],
+        [cmdResume, "resume", "SUSPENDED"],
+      ] as const) {
+        // Accepts the call but never leaves its state — only the wait's
+        // timeout ends the command.
+        const stuck = {
+          async send(c: unknown) {
+            const n = (c as { constructor: { name: string } }).constructor.name;
+            return n === "GetMicrovmCommand" ? { microvmId: "m-1", state } : {};
+          },
+        };
+        const errs: string[] = [];
+        const run = cmd(parseArgs(["m-1", "--timeout", "1000"]), {
+          client: stuck as never,
+          region: "us-east-1",
+          out: () => {},
+          err: (l) => errs.push(l),
+        });
+        await runTimersUntilSettled(run);
+        expect(await run).toBe(1);
+        expect(errs).toEqual([
+          `warning: could not ${verb} m-1: timed out after 1000ms waiting for condition`,
+        ]);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rm retries terminate on Conflict while stuck PENDING (no RUNNING wait)", async () => {

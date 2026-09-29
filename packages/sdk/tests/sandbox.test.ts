@@ -2,6 +2,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { latestActiveVersion, Sandbox } from "../src/sandbox.js";
+import { DEFAULT_IDLE_POLICY } from "../src/types.js";
 import { ARN, FakeMicrovmsClient } from "./helpers.js";
 
 function makeClient(overrides: Record<string, unknown> = {}) {
@@ -35,6 +36,17 @@ function makeClient(overrides: Record<string, unknown> = {}) {
   });
 }
 
+/** makeClient, but every endpoint token mint returns a new token. */
+function mintingClient() {
+  const base = makeClient();
+  let mints = 0;
+  return new FakeMicrovmsClient((cmd: any) =>
+    cmd.constructor.name === "CreateMicrovmAuthTokenCommand"
+      ? { authToken: { "X-aws-proxy-auth": `TOK-${++mints}` } }
+      : base.send(cmd),
+  );
+}
+
 describe("Sandbox.create", () => {
   it("resolves image name, runs, and waits for RUNNING", async () => {
     const client = makeClient();
@@ -66,11 +78,80 @@ describe("Sandbox.create", () => {
   });
 });
 
-describe("Sandbox.request", () => {
-  afterEach(() => vi.unstubAllGlobals());
+describe("Sandbox option checks", () => {
+  const idle = (patch: Partial<typeof DEFAULT_IDLE_POLICY>) => ({
+    idlePolicy: { ...DEFAULT_IDLE_POLICY, ...patch },
+  });
 
-  it("sends auth + port headers and retries once on 403", async () => {
+  it.each([
+    [{ runTimeoutMs: Number.NaN }, "BadTimeout"],
+    [{ runTimeoutMs: 0 }, "BadTimeout"],
+    [{ runTimeoutMs: 0.5 }, "BadTimeout"],
+    [{ tokenTtlMinutes: Number.NaN }, "BadTokenTtl"],
+    [{ tokenTtlMinutes: Number.POSITIVE_INFINITY }, "BadTokenTtl"],
+    [{ allowedPorts: [Number.NaN] }, "BadPort"],
+    [{ allowedPorts: [-1] }, "BadPort"],
+    [{ maximumDurationSeconds: Number.NaN }, "BadMaxDuration"],
+    [{ maximumDurationSeconds: 0 }, "BadMaxDuration"],
+    [{ maximumDurationSeconds: 1.5 }, "BadMaxDuration"],
+    [{ maximumDurationSeconds: 28_801 }, "BadMaxDuration"],
+    [idle({ maxIdleDurationSeconds: Number.NaN }), "BadIdlePolicy"],
+    [idle({ maxIdleDurationSeconds: 0 }), "BadIdlePolicy"],
+    [idle({ suspendedDurationSeconds: -1 }), "BadIdlePolicy"],
+    [idle({ suspendedDurationSeconds: Number.POSITIVE_INFINITY }), "BadIdlePolicy"],
+  ])("create() rejects %o with %s before any API call", async (bad, code) => {
     const client = makeClient();
+    await expect(
+      Sandbox.create({ image: "demo", client, region: "us-east-1", ...bad }),
+    ).rejects.toMatchObject({ code });
+    expect(client.calls).toHaveLength(0);
+  });
+
+  it.each([
+    [{ runTimeoutMs: Number.NaN }, "BadTimeout"],
+    [{ runTimeoutMs: -1 }, "BadTimeout"],
+    [{ tokenTtlMinutes: 0 }, "BadTokenTtl"],
+    [{ allowedPorts: [{ from: Number.NaN, to: 80 }] }, "BadPort"],
+  ])("connect() rejects %o with %s before any API call", async (bad, code) => {
+    const client = makeClient();
+    await expect(Sandbox.connect("mvm-1", { client, ...bad })).rejects.toMatchObject({ code });
+    expect(client.calls).toHaveLength(0);
+  });
+
+  it("create() still passes valid limits through to RunMicrovm", async () => {
+    const client = makeClient();
+    await Sandbox.create({
+      image: "demo",
+      client,
+      region: "us-east-1",
+      maximumDurationSeconds: 28_800,
+      ...idle({ maxIdleDurationSeconds: 60 }),
+    });
+    const run = client.callsOf("RunMicrovmCommand")[0];
+    expect(run.input.maximumDurationInSeconds).toBe(28_800);
+    expect(run.input.idlePolicy).toEqual({ ...DEFAULT_IDLE_POLICY, maxIdleDurationSeconds: 60 });
+  });
+});
+
+describe("Sandbox.request", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, 65_536, 80.5])(
+    "rejects port %s with BadPort before sending",
+    async (port) => {
+      const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+      const fetchSpy = vi.fn(async () => new Response("ok"));
+      vi.stubGlobal("fetch", fetchSpy);
+      await expect(sbx.request("/health", { port })).rejects.toMatchObject({ code: "BadPort" });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it("sends auth + port headers and retries once on 403 with a fresh token", async () => {
+    const client = mintingClient();
     const sbx = await Sandbox.create({ image: ARN, client, region: "us-east-1" });
 
     const seen: Record<string, string>[] = [];
@@ -85,8 +166,109 @@ describe("Sandbox.request", () => {
     const res = await sbx.request("/health", { port: 9000 });
     expect(res.status).toBe(200);
     expect(calls).toBe(2);
-    expect(seen[0]?.["x-aws-proxy-port"]).toBe("9000");
-    expect(seen[0]?.["x-aws-proxy-auth"]).toBe("TOK");
+    expect(seen.map((h) => h["x-aws-proxy-auth"])).toEqual(["TOK-1", "TOK-2"]);
+    expect(seen.map((h) => h["x-aws-proxy-port"])).toEqual(["9000", "9000"]);
+    expect(client.callsOf("CreateMicrovmAuthTokenCommand")).toHaveLength(2);
+  });
+
+  it("drops a rejected token even when the request itself is not retried", async () => {
+    const sbx = await Sandbox.create({ image: ARN, client: mintingClient(), region: "us-east-1" });
+    const tokens: (string | null)[] = [];
+    vi.stubGlobal("fetch", async (_url: string | URL, init?: RequestInit) => {
+      tokens.push(new Headers(init?.headers).get("x-aws-proxy-auth"));
+      return new Response(null, { status: tokens.length === 1 ? 403 : 200 });
+    });
+    expect((await sbx.request("/jobs", { method: "POST", body: "{}" })).status).toBe(403);
+    expect((await sbx.request("/health")).status).toBe(200);
+    expect(tokens).toEqual(["TOK-1", "TOK-2"]);
+  });
+
+  it("retries a POST on 5xx when the caller opts in with retry: true", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return new Response(null, { status: calls === 1 ? 503 : 200 });
+    });
+    const pending = sbx.request("/jobs", { method: "POST", body: "{}", retry: true });
+    await vi.advanceTimersByTimeAsync(250);
+    expect((await pending).status).toBe(200);
+    expect(calls).toBe(2);
+  });
+
+  it("never retries a ReadableStream body, even for an idempotent PUT", async () => {
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return new Response(null, { status: 500 });
+    });
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode("data"));
+        c.close();
+      },
+    });
+    expect((await sbx.request("/blob", { method: "PUT", body })).status).toBe(500);
+    expect(calls).toBe(1);
+  });
+
+  it("waits for Retry-After before retrying a 429", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response(null, { status: 429, headers: { "retry-after": "2" } })
+        : new Response("ok");
+    });
+    const pending = sbx.request("/health");
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(calls).toBe(1);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await pending).status).toBe(200);
+    expect(calls).toBe(2);
+  });
+
+  it("waits for an HTTP-date Retry-After before retrying a 429", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    // HTTP-dates have 1 s resolution: this one lies 2-3 s ahead.
+    const at = new Date(Date.now() + 3_000).toUTCString();
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response(null, { status: 429, headers: { "retry-after": at } })
+        : new Response("ok");
+    });
+    const pending = sbx.request("/health");
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect((await pending).status).toBe(200);
+    expect(calls).toBe(2);
+  });
+
+  it("falls back to the backoff for an unparsable Retry-After", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response(null, { status: 503, headers: { "retry-after": "soon" } })
+        : new Response("ok");
+    });
+    const pending = sbx.request("/health");
+    await vi.advanceTimersByTimeAsync(249);
+    expect(calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await pending).status).toBe(200);
+    expect(calls).toBe(2);
   });
 
   it("never auto-retries a non-idempotent POST (lost-response double-execute)", async () => {
@@ -119,6 +301,104 @@ describe("Sandbox.request", () => {
     const res = await sbx.request("/health");
     expect(res.status).toBe(200);
     expect(calls).toBe(2);
+  });
+
+  it.each([
+    "https://idp.example/login",
+    "http://vm.example/login", // same host, but a TLS downgrade is another origin
+  ])("returns a redirect to %s unfollowed so the token stays on the endpoint", async (location) => {
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string | URL, init?: RequestInit) => {
+      urls.push(String(url));
+      expect(init?.redirect).toBe("manual");
+      return new Response(null, { status: 302, headers: { location } });
+    });
+    const res = await sbx.request("/");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(location);
+    expect(urls).toEqual(["https://vm.example/"]);
+  });
+
+  it("follows a same-origin redirect with the auth and port headers", async () => {
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    const seen: { url: string; headers: Record<string, string> }[] = [];
+    vi.stubGlobal("fetch", async (url: string | URL, init?: RequestInit) => {
+      seen.push({ url: String(url), headers: Object.fromEntries(new Headers(init?.headers)) });
+      return seen.length === 1
+        ? new Response(null, { status: 301, headers: { location: "/docs/" } })
+        : new Response("ok");
+    });
+    const res = await sbx.request("/docs", { port: 3000 });
+    expect(await res.text()).toBe("ok");
+    expect(seen.map((s) => s.url)).toEqual(["https://vm.example/docs", "https://vm.example/docs/"]);
+    expect(seen[1]?.headers["x-aws-proxy-auth"]).toBe("TOK");
+    expect(seen[1]?.headers["x-aws-proxy-port"]).toBe("3000");
+  });
+
+  it.each([
+    [301, { location: "/next" }],
+    [403, {}],
+    [503, {}],
+  ])("cancels a never-ending %i body instead of reading it", async (status, headers) => {
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull: () => new Promise<void>(() => {}), // the app never sends the rest
+      cancel: () => {
+        cancelled = true;
+      },
+    });
+    let calls = 0;
+    vi.stubGlobal("fetch", async () =>
+      ++calls === 1 ? new Response(body, { status, headers }) : new Response("ok"),
+    );
+    const res = await sbx.request("/");
+    expect(await res.text()).toBe("ok");
+    expect(calls).toBe(2);
+    expect(cancelled).toBe(true);
+  });
+
+  it("does not buffer a large redirect body before following it", async () => {
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    const chunk = new Uint8Array(1024 * 1024);
+    let pulled = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull: (c) => {
+        if (pulled >= 64 * chunk.length) return c.close();
+        pulled += chunk.length;
+        c.enqueue(chunk);
+      },
+    });
+    let calls = 0;
+    vi.stubGlobal("fetch", async () =>
+      ++calls === 1
+        ? new Response(body, { status: 302, headers: { location: "/next" } })
+        : new Response("ok"),
+    );
+    expect(await (await sbx.request("/")).text()).toBe("ok");
+    // At most what the stream queues up front, not the 64 MiB.
+    expect(pulled).toBeLessThanOrEqual(2 * chunk.length);
+  });
+
+  it("turns a POST into a body-less GET on a same-origin 303, like fetch()", async () => {
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    const seen: RequestInit[] = [];
+    vi.stubGlobal("fetch", async (_url: string | URL, init?: RequestInit) => {
+      seen.push(init ?? {});
+      return seen.length === 1
+        ? new Response(null, { status: 303, headers: { location: "/result" } })
+        : new Response("done");
+    });
+    await sbx.request("/jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(seen[1]?.method).toBe("GET");
+    expect(seen[1]?.body).toBeUndefined();
+    expect(new Headers(seen[1]?.headers).has("content-type")).toBe(false);
+    expect(new Headers(seen[1]?.headers).get("x-aws-proxy-auth")).toBe("TOK");
   });
 });
 
@@ -322,6 +602,85 @@ describe("Sandbox.exec via fake shell", () => {
     }
   });
 
+  it("readFile feeds the path to base64 on stdin, so a leading '-' is not an option", async () => {
+    const cmds: string[] = [];
+    const wss = new WebSocketServer({ port: 0 });
+    wss.on("connection", (ws) => {
+      let buf = "";
+      ws.on("message", (data: Buffer) => {
+        buf += data.toString();
+        const m = /__SUNABA_DONE_([a-z0-9]+)_%d__/.exec(buf);
+        if (!m) return;
+        const cmd = decodeCmd(buf);
+        buf = "";
+        cmds.push(cmd);
+        const out = cmd.startsWith("wc -c") ? "2\n" : "aGk=\n";
+        ws.send(`${out}__SUNABA_DONE_${m[1]}_0__\n`);
+      });
+    });
+    const port = (wss.address() as AddressInfo).port;
+    try {
+      const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+      const back = await sbx.readFile("-data.bin", { urlOverride: `ws://127.0.0.1:${port}` });
+      expect(back.toString()).toBe("hi");
+      expect(cmds).toEqual(["wc -c < '-data.bin'", "base64 < '-data.bin'"]);
+    } finally {
+      wss.close();
+    }
+  });
+
+  it("retries exec once with a fresh shell token when the connection is refused", async () => {
+    let handshakes = 0;
+    const wss = new WebSocketServer({
+      port: 0,
+      verifyClient: (_info, cb) => {
+        handshakes += 1;
+        if (handshakes === 1) cb(false, 403);
+        else cb(true);
+      },
+    });
+    wss.on("connection", (ws) => {
+      ws.on("message", (data: Buffer) => {
+        const m = /__SUNABA_DONE_([a-z0-9]+)_%d__/.exec(data.toString());
+        if (m) ws.send(`ok\n__SUNABA_DONE_${m[1]}_0__\n`);
+      });
+    });
+    const port = (wss.address() as AddressInfo).port;
+    try {
+      const client = makeClient();
+      const sbx = await Sandbox.create({ image: ARN, client, region: "us-east-1" });
+      const res = await sbx.exec("true", { urlOverride: `ws://127.0.0.1:${port}` });
+      expect(res.output).toBe("ok");
+      expect(handshakes).toBe(2);
+      expect(client.callsOf("CreateMicrovmShellAuthTokenCommand")).toHaveLength(2);
+    } finally {
+      wss.close();
+    }
+  });
+
+  it("retries interactiveShell once with a fresh shell token, then gives up", async () => {
+    let handshakes = 0;
+    const wss = new WebSocketServer({
+      port: 0,
+      verifyClient: (_info, cb) => {
+        handshakes += 1;
+        cb(false, 403);
+      },
+    });
+    const port = (wss.address() as AddressInfo).port;
+    try {
+      const client = makeClient();
+      const sbx = await Sandbox.create({ image: ARN, client, region: "us-east-1" });
+      await expect(
+        sbx.interactiveShell({ urlOverride: `ws://127.0.0.1:${port}` }),
+      ).rejects.toMatchObject({ code: "ShellConnectFailed" });
+      expect(handshakes).toBe(2);
+      expect(client.callsOf("CreateMicrovmShellAuthTokenCommand")).toHaveLength(2);
+    } finally {
+      wss.close();
+    }
+  });
+
   it("readFile chunks large files via dd (no silent truncation)", async () => {
     const wss = new WebSocketServer({ port: 0 });
     wss.on("connection", (ws) => {
@@ -436,8 +795,10 @@ describe("Sandbox.exec via fake shell", () => {
   });
 
   it("readFile rejects a too-small maxOutputBytes instead of looping", async () => {
+    let connections = 0;
     const wss = new WebSocketServer({ port: 0 });
     wss.on("connection", (ws) => {
+      connections++;
       ws.on("message", (data: Buffer) => {
         const text = data.toString();
         const m = /__SUNABA_DONE_([a-z0-9]+)_%d__/.exec(text);
@@ -446,21 +807,49 @@ describe("Sandbox.exec via fake shell", () => {
     });
     const port = (wss.address() as AddressInfo).port;
     try {
-      const sbx = await Sandbox.create({
-        image: ARN,
-        client: makeClient(),
-        region: "us-east-1",
-      });
+      const client = makeClient();
+      const sbx = await Sandbox.create({ image: ARN, client, region: "us-east-1" });
       await expect(
         sbx.readFile("/x", {
           urlOverride: `ws://127.0.0.1:${port}`,
           maxOutputBytes: 1024,
         }),
       ).rejects.toThrow(/too small/);
+      // Known before the stat: no shell token, nothing run in the VM.
+      expect(client.callsOf("CreateMicrovmShellAuthTokenCommand")).toHaveLength(0);
+      expect(connections).toBe(0);
     } finally {
       wss.close();
     }
   });
+
+  it.each([
+    [{ timeoutMs: Number.NaN }, "BadTimeout"],
+    [{ timeoutMs: 0.5 }, "BadTimeout"],
+    [{ timeoutMs: 2 ** 31 }, "BadTimeout"],
+    [{ maxOutputBytes: Number.NaN }, "BadMaxOutputBytes"],
+    [{ maxOutputBytes: -1 }, "BadMaxOutputBytes"],
+    [{ maxOutputBytes: 1.5 }, "BadMaxOutputBytes"],
+  ])(
+    "exec, writeFile and readFile reject %o with %s before minting a shell token",
+    async (bad, code) => {
+      let connections = 0;
+      const wss = new WebSocketServer({ port: 0 });
+      wss.on("connection", () => connections++);
+      const opts = { urlOverride: `ws://127.0.0.1:${(wss.address() as AddressInfo).port}`, ...bad };
+      try {
+        const client = makeClient();
+        const sbx = await Sandbox.create({ image: ARN, client, region: "us-east-1" });
+        await expect(sbx.exec("true", opts)).rejects.toMatchObject({ code });
+        await expect(sbx.writeFile("/x", "hi", opts)).rejects.toMatchObject({ code });
+        await expect(sbx.readFile("/x", opts)).rejects.toMatchObject({ code });
+        expect(client.callsOf("CreateMicrovmShellAuthTokenCommand")).toHaveLength(0);
+        expect(connections).toBe(0);
+      } finally {
+        wss.close();
+      }
+    },
+  );
 
   it("readFile throws when chunks come back short (truncation is not silent)", async () => {
     const wss = new WebSocketServer({ port: 0 });

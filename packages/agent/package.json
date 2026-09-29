@@ -1,6 +1,6 @@
 {
   "name": "sunaba-agent",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Optional in-guest agent for AWS Lambda MicroVMs - exec and filesystem API plus lifecycle hooks",
   "type": "module",
   "bin": {
@@ -11,18 +11,22 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "prepack": "npm run build",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.test.json"
   },
   "devDependencies": {
     "@types/node": "^26.0.0"

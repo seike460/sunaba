@@ -34,21 +34,22 @@ export interface HooksHandlers {
  * `SUNABA_HOOK_<NAME>` holds a shell command run via `/bin/sh -c`; the hook
  * body is passed to the command on stdin (JSON). A non-zero exit makes the
  * hook request fail with 503 so Lambda sees the failure.
- * `SUNABA_HOOK_TIMEOUT_MS` bounds each command (default 300_000; Lambda
- * enforces its own per-hook deadline regardless).
+ * `SUNABA_HOOK_TIMEOUT_MS` bounds each command (default 300_000; values
+ * above 3_600_000 are clamped; Lambda enforces its own per-hook deadline
+ * regardless). A value that is not a number of at least 1 throws a
+ * RangeError.
  */
 export function envHookHandlers(env: NodeJS.ProcessEnv = process.env): HooksHandlers {
   const handlers: HooksHandlers = {};
-  const parsed = Number(env.SUNABA_HOOK_TIMEOUT_MS ?? 300_000);
-  const timeout =
-    Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, MAX_TIMEOUT_MS) : 300_000;
+  const timeout = hookTimeoutMs(env.SUNABA_HOOK_TIMEOUT_MS);
   for (const name of Object.values(HookName)) {
     const cmd = env[`SUNABA_HOOK_${name.toUpperCase()}`];
     if (!cmd) continue;
     handlers[name] = async (body) => {
-      // Reuse the exec machinery: process-group kill on timeout and the
-      // drain grace, so backgrounded hook commands can't hang the lifecycle
-      // request or orphan inside the MicroVM.
+      // Reuse the exec machinery: the drain grace keeps a backgrounded
+      // process (e.g. a daemon started by the ready hook) from hanging the
+      // lifecycle request, and that process keeps running after the command
+      // exits. Only a timeout kills the command's whole process group.
       const r = await runExec({
         command: cmd,
         stdin: Buffer.from(JSON.stringify(body ?? {})).toString("base64"),
@@ -67,9 +68,22 @@ export function envHookHandlers(env: NodeJS.ProcessEnv = process.env): HooksHand
   return handlers;
 }
 
+/** SUNABA_HOOK_TIMEOUT_MS in ms: unset or empty means the default. */
+function hookTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return 300_000;
+  const ms = Number(raw);
+  // A typo ("5m", "abc") used to fall back to the default without a word.
+  // Below 1, runExec would reject every hook command with a 400.
+  if (!Number.isFinite(ms) || ms < 1) {
+    throw new RangeError(`SUNABA_HOOK_TIMEOUT_MS must be a number of ms >= 1, got '${raw}'`);
+  }
+  return Math.min(ms, MAX_TIMEOUT_MS);
+}
+
 export interface HooksServerOptions {
   port: number;
   host?: string;
+  /** Max hook body in bytes, a non-negative integer. Default 1 MiB. */
   maxBodyBytes?: number;
   onError?: (err: Error) => void;
 }

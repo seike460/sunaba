@@ -1,6 +1,6 @@
 {
   "name": "sunaba-sdk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "High-level TypeScript SDK for AWS Lambda MicroVMs - sandboxes, exec, auth tokens, lifecycle",
   "type": "module",
   "main": "./dist/index.js",
@@ -8,22 +8,34 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./guest": {
       "types": "./dist/guest/index.d.ts",
-      "import": "./dist/guest/index.js"
+      "import": "./dist/guest/index.js",
+      "default": "./dist/guest/index.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "guest": [
+        "./dist/guest/index.d.ts"
+      ]
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "prepack": "npm run build",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.test.json"
   },
   "dependencies": {
     "@aws-sdk/client-lambda-microvms": "^3.1141.0",

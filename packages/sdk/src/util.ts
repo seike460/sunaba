@@ -1,9 +1,54 @@
 import { SunabaError } from "./errors.js";
 
-/** Default cap for captured process output (stdout or stderr). */
+/** Default cap for retained shell (PTY) output, which merges stdout and stderr. */
 export const DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 
-export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** setTimeout's largest delay; larger values fire immediately. */
+export const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/**
+ * Throw SunabaError(code) unless `value` is a number in [min, max] — an
+ * integer when `integer` is set. NaN and Infinity always fail.
+ */
+export function checkNumber(
+  value: unknown,
+  name: string,
+  code: string,
+  { min, max = Number.MAX_SAFE_INTEGER, integer = false }: CheckNumberBounds,
+): void {
+  if (
+    typeof value !== "number" ||
+    !(value >= min && value <= max) ||
+    (integer && !Number.isInteger(value))
+  ) {
+    const range = max === Number.MAX_SAFE_INTEGER ? `>= ${min}` : `${min}-${max}`;
+    throw new SunabaError(
+      code,
+      `${name} must be ${integer ? "an integer" : "a number"} ${range}, got ${String(value)}`,
+    );
+  }
+}
+
+interface CheckNumberBounds {
+  min: number;
+  /** Default Number.MAX_SAFE_INTEGER, which also rules out Infinity. */
+  max?: number;
+  integer?: boolean;
+}
+
+/** Resolve after `ms`, or as soon as `signal` aborts (the caller checks it). */
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
 
 /** Throw BadResponse when a required response field is absent. */
 export function required<T>(v: T | undefined | null, name: string): T {

@@ -7,4 +7,3 @@ cdk.out/
 .env
 .env.*
 !.env.example
-.codex-review-prompt.txt

@@ -20,8 +20,9 @@ export type RequestBody =
   | null;
 
 /**
- * Idle policy for automatic suspend/resume.
- * - maxIdleDurationSeconds: suspend after this much endpoint inactivity (max 28800)
+ * Idle policy for automatic suspend/resume. Sandbox.create() rejects
+ * seconds that are not integers 1-28800 with "BadIdlePolicy".
+ * - maxIdleDurationSeconds: suspend after this much endpoint inactivity
  * - suspendedDurationSeconds: terminate after being suspended this long
  * - autoResumeEnabled: resume when traffic arrives at the endpoint
  */
@@ -50,7 +51,11 @@ export type PortSpec = number | "all" | { from: number; to: number };
 
 /** Client injection point: a real LambdaMicrovmsClient, config, or test stub. */
 export interface ClientOptions {
-  /** AWS region. Defaults to AWS_REGION/AWS_DEFAULT_REGION env or the client's. */
+  /**
+   * AWS region. Defaults to the injected `client`'s region, then
+   * `clientConfig.region`, then AWS_REGION/AWS_DEFAULT_REGION, then the
+   * default provider chain (shared config profile, SSO, IMDS).
+   */
   region?: string;
   /** Pre-configured client (useful for tests or custom credentials). */
   client?: LambdaMicrovmsClientLike;
@@ -74,7 +79,7 @@ export interface ExecResult {
 }
 
 export interface ExecOptions {
-  /** Wall-clock budget for the command. Default 120s. */
+  /** Wall-clock budget for the command, 1 to 2^31-1 ms. Default 120s. */
   timeoutMs?: number;
   /** Working directory inside the MicroVM. */
   cwd?: string;
@@ -83,12 +88,18 @@ export interface ExecOptions {
    * Default `wss://{endpoint}/shell`.
    */
   urlOverride?: string;
-  /** Cap retained shell output (bytes). Default 16 MiB; oldest data drops. */
+  /**
+   * Cap retained shell output (bytes, a non-negative integer). Default
+   * 16 MiB; oldest data drops.
+   */
   maxOutputBytes?: number;
 }
 
 export interface RequestOptions {
-  /** Target port inside the MicroVM. Default 8080 (the endpoint default). */
+  /**
+   * Target port inside the MicroVM, an integer 1-65535 (else "BadPort").
+   * Default 8080 (the endpoint default).
+   */
   port?: number;
   method?: string;
   headers?: Record<string, string>;
@@ -110,6 +121,7 @@ export interface SandboxCreateOptions extends ClientOptions {
   imageVersion?: string;
   executionRoleArn?: string;
   idlePolicy?: IdlePolicy;
+  /** Lifetime limit, an integer 1-28800 s (else "BadMaxDuration"). Service default when omitted. */
   maximumDurationSeconds?: number;
   /**
    * Ingress connector refs: managed names (HTTP_INGRESS, SHELL_INGRESS,
@@ -126,11 +138,11 @@ export interface SandboxCreateOptions extends ClientOptions {
   /** Up to 16 KiB delivered to the /run hook as runHookPayload. */
   runHookPayload?: string;
   logging?: Logging;
-  /** Auth token TTL in minutes (max per token). Default 30. */
+  /** Auth token TTL in minutes, an integer 1-60 (else "BadTokenTtl"). Default 30. */
   tokenTtlMinutes?: number;
   /** Port scope baked into auth tokens. Default "all". */
   allowedPorts?: readonly PortSpec[];
-  /** Milliseconds to wait for RUNNING after RunMicrovm. Default 120_000. */
+  /** Milliseconds to wait for RUNNING after RunMicrovm (>= 1, else "BadTimeout"). Default 120_000. */
   runTimeoutMs?: number;
   /** Idempotency token forwarded to RunMicrovm. */
   clientToken?: string;
@@ -143,13 +155,15 @@ export interface SandboxCreateOptions extends ClientOptions {
 }
 
 export interface SandboxConnectOptions extends ClientOptions {
+  /** Auth token TTL in minutes, an integer 1-60 (else "BadTokenTtl"). Default 30. */
   tokenTtlMinutes?: number;
+  /** Port scope baked into auth tokens. Default "all". */
   allowedPorts?: readonly PortSpec[];
   /**
    * When the target is SUSPENDED, resume it first. Default true.
    */
   resume?: boolean;
-  /** Milliseconds to wait for RUNNING when resuming. Default 120_000. */
+  /** Milliseconds to wait for RUNNING when resuming (>= 1, else "BadTimeout"). Default 120_000. */
   runTimeoutMs?: number;
 }
 
@@ -173,7 +187,10 @@ export interface MicrovmImageBuildOptions extends ClientOptions {
   /** Pin a managed base image version. Latest when omitted. */
   baseImageVersion?: string;
   buildRoleArn: string;
-  /** Baseline memory in MiB: 512 | 1024 | 2048 | 4096 | 8192. Service default is 2048 (2 GB / 1 vCPU) when unset. */
+  /**
+   * Baseline memory in MiB: 512 | 1024 | 2048 | 4096 | 8192. Service default is 2048 (2 GB / 1 vCPU)
+   * when unset. A value that is not a positive integer is rejected with "BadMemory".
+   */
   memoryMiB?: number;
   /** CPU architecture. Currently ARM_64 is the only published value. */
   architecture?: "ARM_64";
@@ -187,7 +204,7 @@ export interface MicrovmImageBuildOptions extends ClientOptions {
   tags?: Record<string, string>;
   /** Idempotency token forwarded to CreateMicrovmImage. */
   clientToken?: string;
-  /** Poll timeout for the version build. Default 900_000 (15 min). */
+  /** Poll timeout for the version build (>= 1, else "BadTimeout"). Default 900_000 (15 min). */
   buildTimeoutMs?: number;
   /**
    * Injected S3 client for artifact uploads (tests/custom config).

@@ -16,7 +16,7 @@ import type {
   MicrovmImageBuildOptions,
   MicrovmImageBuildResult,
 } from "./types.js";
-import { required, sleep } from "./util.js";
+import { checkNumber, isNotFoundError, required, sleep } from "./util.js";
 import { waitForImageVersion } from "./waiters.js";
 
 const DEFAULT_PREFIX = "sunaba/images/";
@@ -36,6 +36,15 @@ export async function buildMicrovmImage(
       "MicroVM image builds support at most 1 egress connector",
     );
   }
+  // Checked before the upload and CreateMicrovmImage: a NaN memoryMiB was
+  // dropped without a word, and a bad buildTimeoutMs found later would
+  // abandon a build that has already started.
+  if (opts.memoryMiB !== undefined) {
+    checkNumber(opts.memoryMiB, "memoryMiB", "BadMemory", { min: 1, integer: true });
+  }
+  if (opts.buildTimeoutMs !== undefined) {
+    checkNumber(opts.buildTimeoutMs, "buildTimeoutMs", "BadTimeout", { min: 1 });
+  }
   const client = resolveClient(opts);
   // Region is only needed to expand managed connector names; the S3
   // client resolves its own region from config/env when absent.
@@ -46,11 +55,18 @@ export async function buildMicrovmImage(
   // imageVersion, the fallback below must wait for a version it hasn't seen.
   const preExisting = new Set(
     // imageIdentifier wants an ARN/ID — resolve the name first when it
-    // exists; a brand-new image just yields an empty snapshot.
+    // exists; only a brand-new (not found) image yields an empty snapshot.
+    // Other errors (throttling, AccessDenied) must surface — an empty
+    // snapshot would let the fallback return an older version.
     (
       await resolveImageArn(client, opts.name)
         .then((arn) => listAllVersions(client, arn))
-        .catch(() => [])
+        .catch((e) => {
+          if ((e instanceof SunabaError && e.code === "ImageNotFound") || isNotFoundError(e)) {
+            return [];
+          }
+          throw e;
+        })
     ).map((v) => v.imageVersion),
   );
   const res = (await client.send(
@@ -142,7 +158,13 @@ async function resolveArtifactUri(
 
 /**
  * Entries that must never be baked into a MicroVM image (secrets).
- * Matched against the file's basename; `*` matches a suffix/prefix.
+ * Each RegExp is tested against a single path segment: every walked
+ * entry's name, and every segment of a symlink's resolved target.
+ *
+ * The secret entries mirror sunaba-cdk's DEFAULT_EXCLUDE_PATTERNS; keep
+ * them in sync. The lists still differ: most entries here ignore case
+ * (the CDK globs do not), and only this list drops .dockerignore,
+ * .gitignore and .gitmodules, which are not secrets.
  */
 const SECRET_DENYLIST: RegExp[] = [
   /^\.env(\..*)?$/i,
@@ -173,8 +195,7 @@ const SECRET_DENYLIST: RegExp[] = [
   // Terraform state carries plaintext secrets — including backups
   // (terraform.tfstate.backup, .tfstate~).
   /\.tfstate/i,
-  // PuTTY private keys. Keep in sync with sunaba-cdk's
-  // DEFAULT_EXCLUDE_PATTERNS — both lists are the same secret barrier.
+  // PuTTY private keys.
   /\.ppk$/i,
   // Not a secret — a zip-safety exclusion: fflate's fltn() writes entries
   // into a plain {} where "__proto__" hits the prototype setter, which

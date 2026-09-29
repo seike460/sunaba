@@ -10,7 +10,7 @@ export interface ExecRequest {
   env?: Record<string, string>;
   /** base64-encoded stdin piped to the process. */
   stdin?: string;
-  /** Kill the process tree after N ms. Default 30_000, max 3_600_000. */
+  /** Kill the process tree after N ms, 1 to 3_600_000. Default 30_000. */
   timeoutMs?: number;
   /** Cap captured stdout/stderr each. Default 16 MiB, max 256 MiB. */
   maxOutputBytes?: number;
@@ -40,18 +40,20 @@ const DRAIN_GRACE_MS = 2_000;
 /** Live children so close()/shutdown can reap them instead of orphaning. */
 const liveChildren = new Set<ChildProcess>();
 
-export function killAllExecs(): void {
-  for (const child of liveChildren) {
+function killProcessTree(child: ChildProcess): void {
+  try {
+    if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+  } catch {
     try {
-      if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+      child.kill("SIGKILL");
     } catch {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // already gone
-      }
+      // already gone
     }
   }
+}
+
+export function killAllExecs(): void {
+  for (const child of liveChildren) killProcessTree(child);
 }
 
 export async function runExec(req: ExecRequest): Promise<ExecResult> {
@@ -68,7 +70,7 @@ export async function runExec(req: ExecRequest): Promise<ExecResult> {
     throw new HttpError(400, "argv must be an array of strings");
   }
   const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
     throw new HttpError(400, `timeoutMs must be 1..${MAX_TIMEOUT_MS}`);
   }
   const maxOut = req.maxOutputBytes ?? DEFAULT_MAX_OUT;
@@ -146,21 +148,9 @@ export async function runExec(req: ExecRequest): Promise<ExecResult> {
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      killTree();
+      killProcessTree(child);
     }, timeoutMs);
     timer.unref();
-
-    function killTree() {
-      try {
-        if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
-      } catch {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          // already gone
-        }
-      }
-    }
 
     let exitCode: number | null | undefined;
     let exitSignal: string | undefined;

@@ -30,8 +30,6 @@ import { configPath, loadConfig, type SunabaConfig, writeConfig } from "./config
 export type LogsClient = LambdaMicrovmsClientLike;
 
 export interface CliContext extends ClientOptions {
-  /** Injected for tests; defaults to the real AWS client. */
-  client?: LambdaMicrovmsClientLike;
   /** Injected CloudWatch Logs client (tests). */
   logsClient?: LogsClient;
   out?: (line: string) => void;
@@ -89,13 +87,12 @@ RUN microdnf install -y nodejs tar && microdnf clean all
 # OPTIONAL in-guest agent: exec/fs API on :8080 + lifecycle hooks on
 # :9000. Exec/shell work agent-free via the managed SHELL_INGRESS
 # connector, so you only need this for the HTTP API or hooks.
-# sunaba-agent ships in this repo — once published, uncomment:
+# To use it, uncomment these lines. The agent only answers while
+# sunaba-agentd runs: make it the container command, or start it from
+# your own entrypoint next to the app.
 #   RUN npm install -g sunaba-agent
 #   EXPOSE 8080 9000
-# Or vendor it: run \`npm pack\` inside this repo's packages/agent,
-# COPY the resulting .tgz into this directory, then:
-#   COPY sunaba-agent-*.tgz .
-#   RUN npm install -g ./sunaba-agent-*.tgz && rm ./sunaba-agent-*.tgz
+#   CMD ["sunaba-agentd"]
 
 # Replace with your real application entrypoint.
 # CMD ["node", "/app/server.js"]
@@ -281,8 +278,10 @@ export async function cmdRun(args: ParsedArgs, ctx: CliContext): Promise<number>
         if (sb) {
           await sb.terminate();
         } else {
-          // VM was created but the Sandbox wrapper doesn't exist yet —
-          // still inside Sandbox.create's RUNNING wait.
+          // VM was created but no Sandbox wrapper exists: a signal landed
+          // during Sandbox.create's RUNNING wait, or create failed after
+          // its own best-effort terminate. TerminateMicrovm is idempotent,
+          // so repeating it is safe and retries one the SDK could not send.
           const client = resolveClient(clientOpts(ctx));
           await client.send(new TerminateMicrovmCommand({ microvmIdentifier: vmId }));
         }
@@ -361,7 +360,7 @@ export async function cmdRun(args: ParsedArgs, ctx: CliContext): Promise<number>
     if (command) {
       stderr(ctx)(`${vmId} ${sb.endpoint}`);
       const res = await sb.exec(command, { timeoutMs });
-      stdout(ctx)(res.output);
+      stdout(ctx)(json ? JSON.stringify({ microvmId: vmId, ...res }) : res.output);
       return res.exitCode;
     }
     stdout(ctx)(
@@ -548,9 +547,7 @@ async function sendWithConflictRetry(
   } catch (e) {
     if ((e as { name?: string }).name !== "ConflictException") throw e;
   }
-  const info = await settle();
-  if (info === "dead") return "dead";
-  return info;
+  return settle();
 }
 
 /** Shared driver for `suspend` and `resume` — identical flow, different command/goal. */
@@ -708,6 +705,23 @@ export async function cmdRm(args: ParsedArgs, ctx: CliContext): Promise<number> 
 
 const LOG_GROUP_PREFIX = "/aws/lambda-microvms";
 
+interface LogEvent {
+  timestamp?: number;
+  message?: string;
+}
+
+const ESC = String.fromCharCode(0x1b);
+// Messages come from code inside the sandbox — untrusted. Drop CSI
+// sequences (colors, cursor moves) whole and every other control
+// character except tab and newline, so a message cannot drive the
+// viewer's terminal.
+const LOG_CONTROL_RE = new RegExp(`${ESC}\\[[0-?]*[ -/]*[@-~]|(?![\\t\\n])\\p{Cc}`, "gu");
+
+function formatLogEvent(ev: LogEvent): string {
+  const message = (ev.message ?? "").replace(LOG_CONTROL_RE, "");
+  return `${new Date(ev.timestamp ?? 0).toISOString()} ${message}`;
+}
+
 async function logsClient(ctx: CliContext): Promise<LogsClient> {
   if (ctx.logsClient) return ctx.logsClient;
   const { CloudWatchLogsClient } = await import("@aws-sdk/client-cloudwatch-logs");
@@ -787,25 +801,42 @@ async function resolveLogTarget(
   id: string,
 ): Promise<{ group: string; streams: string[] }> {
   const client = resolveClient(clientOpts(ctx));
+  // The image only orders the scan, so a failed lookup falls back to the
+  // full scan — and is reported only if that scan finds nothing.
+  let lookupError: unknown;
   const preferred = await getMicrovm(client, id)
     .then((i) => imageNameOf(i.imageArn))
     .then((n) => (n ? `${LOG_GROUP_PREFIX}/${n}` : undefined))
-    .catch(() => undefined);
+    .catch((e: unknown) => {
+      if (!isNotFoundError(e)) lookupError = e;
+      return undefined;
+    });
   const groups = await listManagedLogGroups(cw);
   const ordered = preferred ? [preferred, ...groups.filter((g) => g !== preferred)] : groups.sort();
   // Probe groups with bounded concurrency — a busy account can have many
   // managed groups and a sequential scan would be slow.
   const CONCURRENCY = 4;
+  // A group deleted mid-scan has no streams. Any other probe
+  // failure (AccessDenied, throttling) only matters when no group yields
+  // the streams — then it, not "no log streams", is the real cause.
+  let probeError: unknown;
   for (let i = 0; i < ordered.length; i += CONCURRENCY) {
     const batch = await Promise.all(
       ordered.slice(i, i + CONCURRENCY).map(async (group) => ({
         group,
-        streams: await findStreams(cw, group, id).catch(() => [] as string[]),
+        streams: await findStreams(cw, group, id).catch((e: unknown) => {
+          if (!isNotFoundError(e)) probeError ??= e;
+          return [] as string[];
+        }),
       })),
     );
     const hit = batch.find((b) => b.streams.length);
     if (hit) return hit;
   }
+  // A failed lookup or probe explains an empty result better than the
+  // result itself, including "no log group at all".
+  if (probeError !== undefined) throw probeError;
+  if (lookupError !== undefined) throw lookupError;
   if (!ordered.length) {
     throw new Error(`no log group under ${LOG_GROUP_PREFIX} — pass --group`);
   }
@@ -815,7 +846,7 @@ async function resolveLogTarget(
 export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number> {
   assertFlags(args, ["group", "follow", "tail"]);
   const id = args._[0];
-  if (!id) throw new Error("usage: sunaba logs <microvm-id> [--group name] [--follow]");
+  if (!id) throw new Error("usage: sunaba logs <microvm-id> [--group name] [--follow] [--tail n]");
   if (args._.length > 1) throw new Error(`unexpected arguments: ${args._.slice(1).join(" ")}`);
   const tail = flagInt(args, "tail", { min: 1, max: 10_000 });
   const follow = flagBool(args, "follow");
@@ -843,13 +874,13 @@ export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number
   // nextForwardToken is a per-stream cursor — track them separately.
   const tokens = new Map<string, string | undefined>();
   if (!follow) {
-    const events: { timestamp?: number; message?: string }[] = [];
+    const events: LogEvent[] = [];
     // Single stream with no --tail: stream output directly instead of
     // buffering the whole history in memory.
     const printNow = names.length === 1 && tail === undefined;
-    const emit = (ev: { timestamp?: number; message?: string }) => {
+    const emit = (ev: LogEvent) => {
       if (printNow) {
-        stdout(ctx)(`${new Date(ev.timestamp ?? 0).toISOString()} ${ev.message ?? ""}`);
+        stdout(ctx)(formatLogEvent(ev));
       } else {
         events.push(ev);
       }
@@ -867,7 +898,7 @@ export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number
               ...(next ? { nextToken: next } : {}),
             }),
           )) as {
-            events?: { timestamp?: number; message?: string }[];
+            events?: LogEvent[];
             nextForwardToken?: string;
           };
           for (const ev of res.events ?? []) emit(ev);
@@ -887,7 +918,7 @@ export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number
               ...(back ? { nextToken: back } : {}),
             }),
           )) as {
-            events?: { timestamp?: number; message?: string }[];
+            events?: LogEvent[];
             nextBackwardToken?: string;
           };
           const got = res.events ?? [];
@@ -902,12 +933,13 @@ export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number
     }
     events.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
     for (const ev of events.slice(tail !== undefined ? -tail : 0)) {
-      stdout(ctx)(`${new Date(ev.timestamp ?? 0).toISOString()} ${ev.message ?? ""}`);
+      stdout(ctx)(formatLogEvent(ev));
     }
     return 0;
   }
-  // --follow: `tail -f` semantics — drain the backlog first (bounded),
-  // then poll and print only new events. A repeated token = end-of-stream.
+  // --follow: like `docker logs -f`, not `tail -f` — print every stream
+  // from its head, then keep polling from the saved token for new events.
+  // A repeated token = end-of-stream.
   const get = (streamName: string, next?: string) =>
     cw.send(
       new GetLogEventsCommand({
@@ -917,7 +949,7 @@ export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number
         ...(next ? { nextToken: next } : {}),
       }),
     ) as Promise<{
-      events?: { timestamp?: number; message?: string }[];
+      events?: LogEvent[];
       nextForwardToken?: string;
     }>;
   const MAX_PAGES = 10; // cap work per stream per cycle — busy streams
@@ -932,9 +964,10 @@ export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number
       String(e),
     );
   };
-  // Initial backlog: print as we go so nothing is dropped; the page cap
-  // bounds how much history we show before switching to live-follow, and
-  // the attempt cap stops a persistently-failing stream from wedging
+  // Initial backlog: print as we go so nothing is dropped. The page cap
+  // only bounds this first pass per stream — a longer history keeps
+  // printing in the polling loop below, MAX_PAGES per stream per cycle.
+  // The attempt cap stops a persistently-failing stream from wedging
   // peers or the follow loop entirely.
   const MAX_ATTEMPTS = 5;
   for (const streamName of names) {
@@ -944,7 +977,7 @@ export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number
       try {
         const res = await get(streamName, next);
         for (const ev of res.events ?? []) {
-          stdout(ctx)(`${new Date(ev.timestamp ?? 0).toISOString()} ${ev.message ?? ""}`);
+          stdout(ctx)(formatLogEvent(ev));
         }
         if (res.nextForwardToken) tokens.set(streamName, res.nextForwardToken);
         if (!res.nextForwardToken || res.nextForwardToken === next) break;
@@ -967,7 +1000,7 @@ export async function cmdLogs(args: ParsedArgs, ctx: CliContext): Promise<number
         for (let page = 0; page < MAX_PAGES; page++) {
           const res = await get(streamName, tokens.get(streamName));
           for (const ev of res.events ?? []) {
-            stdout(ctx)(`${new Date(ev.timestamp ?? 0).toISOString()} ${ev.message ?? ""}`);
+            stdout(ctx)(formatLogEvent(ev));
           }
           const prev = tokens.get(streamName);
           if (res.nextForwardToken) tokens.set(streamName, res.nextForwardToken);

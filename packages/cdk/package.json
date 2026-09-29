@@ -1,6 +1,6 @@
 {
   "name": "sunaba-cdk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "AWS CDK L2 constructs for AWS Lambda MicroVMs",
   "type": "module",
   "main": "./dist/index.js",
@@ -8,22 +8,26 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "prepack": "npm run build",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.test.json"
   },
   "peerDependencies": {
     "aws-cdk-lib": "^2.261.0",
-    "constructs": "^10.0.0"
+    "constructs": "^10.5.0"
   },
   "devDependencies": {
     "@types/node": "^26.0.0",

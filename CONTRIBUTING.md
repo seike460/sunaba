@@ -1,6 +1,8 @@
 # Contributing
 
 Thanks for your interest in sunaba. Issues and pull requests are welcome.
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md),
+not in a public issue.
 
 ## Setup
 
@@ -10,6 +12,7 @@ needs ≥20.19 — use the latest Node 20.x or newer.
 ```bash
 npm install
 npm run build     # sdk → agent, cdk, cli (dependency order)
+npm run typecheck # tsc over src, tests and examples (after build)
 npm test          # vitest — offline, no AWS credentials needed
 npm run check     # biome lint + format
 ```
@@ -24,5 +27,20 @@ npm run check     # biome lint + format
 ## Pull requests
 
 - Keep changes focused; add regression tests for bug fixes
-- `npm run build && npm test && npm run check` must be green
+- `npm run build && npm run typecheck && npm test && npm run check` must be green
 - Describe the "why", not just the "what"
+
+## Releasing
+
+Record user-visible changes under `[Unreleased]` in `CHANGELOG.md`. The
+release commit moves them under the new version, and that section becomes
+the body of the GitHub release.
+
+Tag, `npm publish` and create the GitHub release only from a commit whose
+`ci` run on `main` passed on every Node version:
+
+```bash
+sha=$(git rev-parse HEAD)
+run=$(gh run list --workflow ci --commit "$sha" --event push --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run watch "${run:?no ci run for $sha yet}" --exit-status   # waits; non-zero unless every job passed
+```

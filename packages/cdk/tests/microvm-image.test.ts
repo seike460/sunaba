@@ -1,18 +1,38 @@
-import { mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { App, aws_iam as iam, RemovalPolicy, Stack, aws_s3 as s3 } from "aws-cdk-lib";
+import {
+  App,
+  aws_ec2 as ec2,
+  aws_iam as iam,
+  aws_kms as kms,
+  RemovalPolicy,
+  Stack,
+  aws_s3 as s3,
+} from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
-import { describe, expect, it } from "vitest";
-import { MicrovmImage, MicrovmImageSources } from "../src/index.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { MicrovmImage, MicrovmImageSources, MicrovmNetworkConnector } from "../src/index.js";
 
-function stackWithImage(props?: Partial<Parameters<typeof MicrovmImage>[2]>) {
+type ImageProps = ConstructorParameters<typeof MicrovmImage>[2];
+
+const tmpDirs: string[] = [];
+function tmp(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tmpDirs.push(dir);
+  return dir;
+}
+afterEach(() => {
+  for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+function stackWithImage(props?: Partial<ImageProps>) {
   const app = new App();
   const stack = new Stack(app, "TestStack");
   const image = new MicrovmImage(stack, "Image", {
     source: MicrovmImageSources.fromS3Uri("s3://artifacts-bucket/app.zip"),
     ...props,
-  } as Parameters<typeof MicrovmImage>[2]);
+  } as ImageProps);
   return { stack, image, template: Template.fromStack(stack) };
 }
 
@@ -127,7 +147,7 @@ describe("MicrovmImage", () => {
   });
 
   it("packages a local directory as an S3 asset", () => {
-    const dir = mkdtempSync(join(tmpdir(), "sunaba-asset-"));
+    const dir = tmp("sunaba-asset-");
     writeFileSync(join(dir, "Dockerfile"), "FROM al2023\n");
     const app = new App();
     const stack = new Stack(app, "TestStack");
@@ -138,13 +158,27 @@ describe("MicrovmImage", () => {
     template.hasResourceProperties("AWS::Lambda::MicrovmImage", {
       CodeArtifact: { Uri: Match.objectLike({ "Fn::Join": Match.anyValue() }) },
     });
+    // Read is limited to the uploaded object, not the bootstrap bucket.
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: ["s3:GetObject", "s3:GetObjectVersion"],
+            Resource: {
+              "Fn::Join": ["", Match.arrayWith([Match.stringLikeRegexp("^/[0-9a-f]{64}\\.zip$")])],
+            },
+          }),
+        ]),
+      },
+    });
+    expect(JSON.stringify(template.toJSON())).not.toMatch(/s3:List|s3:GetBucket/);
   });
 
   // Staging a directory asset copies it to <outdir>/asset.<hash>/ — synth for
   // real and walk the staged files so exclusion is verified end to end,
   // including nested paths.
-  function synthAssetEntries(source: Parameters<typeof MicrovmImage>[2]["source"]) {
-    const outdir = mkdtempSync(join(tmpdir(), "sunaba-out-"));
+  function synthAssetEntries(source: ImageProps["source"]) {
+    const outdir = tmp("sunaba-out-");
     const app = new App({ outdir });
     const stack = new Stack(app, "TestStack");
     new MicrovmImage(stack, "Image", { source });
@@ -162,7 +196,7 @@ describe("MicrovmImage", () => {
   }
 
   it("keeps secrets and noise out of directory assets by default", () => {
-    const dir = mkdtempSync(join(tmpdir(), "sunaba-asset-"));
+    const dir = tmp("sunaba-asset-");
     writeFileSync(join(dir, "Dockerfile"), "FROM al2023\n");
     writeFileSync(join(dir, "app.js"), "code\n");
     writeFileSync(join(dir, ".env"), "SECRET=x\n");
@@ -195,7 +229,7 @@ describe("MicrovmImage", () => {
   });
 
   it("honours a caller-provided exclude list (replaces the defaults)", () => {
-    const dir = mkdtempSync(join(tmpdir(), "sunaba-asset-"));
+    const dir = tmp("sunaba-asset-");
     writeFileSync(join(dir, "Dockerfile"), "FROM al2023\n");
     writeFileSync(join(dir, ".env"), "kept when caller opts out of defaults\n");
     const entries = synthAssetEntries(
@@ -259,7 +293,7 @@ describe("MicrovmImage", () => {
     });
   });
 
-  it("fromBucket source grants bucket read", () => {
+  it("fromBucket source grants read on that key only", () => {
     const app = new App();
     const stack = new Stack(app, "TestStack");
     const bucket = s3.Bucket.fromBucketName(stack, "Bucket", "real-bucket");
@@ -274,12 +308,70 @@ describe("MicrovmImage", () => {
       PolicyDocument: {
         Statement: Match.arrayWith([
           Match.objectLike({
-            Action: Match.arrayWith(["s3:GetObject*"]),
-            Resource: Match.arrayWith([Match.objectLike({ "Fn::Join": Match.anyValue() })]),
+            Action: ["s3:GetObject", "s3:GetObjectVersion"],
+            Resource: {
+              "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":s3:::real-bucket/k.zip"]],
+            },
           }),
         ]),
       },
     });
+    const json = JSON.stringify(template.toJSON());
+    expect(json).not.toMatch(/s3:List|s3:GetBucket/);
+    expect(json).not.toContain('":s3:::real-bucket"');
+  });
+
+  it("fromBucket source grants decrypt on the bucket's KMS key", () => {
+    const app = new App();
+    const stack = new Stack(app, "TestStack");
+    const key = new kms.Key(stack, "Key");
+    const bucket = s3.Bucket.fromBucketAttributes(stack, "Bucket", {
+      bucketName: "real-bucket",
+      encryptionKey: key,
+    });
+    new MicrovmImage(stack, "Image", {
+      source: MicrovmImageSources.fromBucket(bucket, "k.zip"),
+    });
+    Template.fromStack(stack).hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: "kms:Decrypt",
+            Resource: stack.resolve(key.keyArn) as Record<string, unknown>,
+          }),
+        ]),
+      },
+    });
+  });
+
+  it("fromBucket falls back to the bucket policy for an immutable role", () => {
+    const app = new App();
+    const stack = new Stack(app, "T");
+    const bucket = new s3.Bucket(stack, "Bucket");
+    const role = iam.Role.fromRoleArn(stack, "Imported", "arn:aws:iam::123456789012:role/ext", {
+      mutable: false,
+    });
+    const image = new MicrovmImage(stack, "Image", {
+      source: MicrovmImageSources.fromBucket(bucket, "k.zip"),
+      buildRole: role,
+    });
+    const template = Template.fromStack(stack);
+    template.hasResourceProperties("AWS::S3::BucketPolicy", {
+      PolicyDocument: {
+        Statement: [
+          Match.objectLike({
+            Action: ["s3:GetObject", "s3:GetObjectVersion"],
+            Principal: { AWS: "arn:aws:iam::123456789012:role/ext" },
+          }),
+        ],
+      },
+    });
+    const policyIds = Object.keys(template.findResources("AWS::S3::BucketPolicy"));
+    const resource = Object.values(template.findResources("AWS::Lambda::MicrovmImage"))[0] as {
+      DependsOn?: string[];
+    };
+    expect(resource.DependsOn ?? []).toEqual(expect.arrayContaining(policyIds));
+    expect(image.node.metadata.filter((m) => m.type === "aws:cdk:warning")).toHaveLength(0);
   });
 
   it("applies a custom removal policy", () => {
@@ -314,7 +406,7 @@ describe("MicrovmImage", () => {
   });
 
   it("image resource depends on the grant policy for a directory asset + imported role", () => {
-    const dir = mkdtempSync(join(tmpdir(), "sunaba-asset-"));
+    const dir = tmp("sunaba-asset-");
     writeFileSync(join(dir, "Dockerfile"), "FROM al2023\n");
     const app = new App();
     const stack = new Stack(app, "T");
@@ -337,9 +429,7 @@ describe("MicrovmImage", () => {
     expect(image.node.metadata.filter((m) => m.type === "aws:cdk:warning")).toHaveLength(0);
   });
 
-  it("resolves a real MicrovmNetworkConnector in egressConnectors", async () => {
-    const { MicrovmNetworkConnector } = await import("../src/index.js");
-    const { aws_ec2: ec2 } = await import("aws-cdk-lib");
+  it("resolves a real MicrovmNetworkConnector in egressConnectors", () => {
     const app = new App();
     const stack = new Stack(app, "T");
     const vpc = new ec2.Vpc(stack, "Vpc", { natGateways: 0 });
@@ -396,6 +486,11 @@ describe("MicrovmImage", () => {
     const stack = new Stack(app, "T");
     const src = MicrovmImageSources.fromS3Uri("s3://bkt/k.zip");
     expect(() => new MicrovmImage(stack, "I1", { source: src, memoryMiB: 0 })).toThrow(/memoryMiB/);
+    for (const [i, memoryMiB] of [Number.NaN, Number.POSITIVE_INFINITY, -1024, 1024.5].entries()) {
+      expect(() => new MicrovmImage(stack, `M${i}`, { source: src, memoryMiB })).toThrow(
+        /memoryMiB must be one of/,
+      );
+    }
     expect(() => new MicrovmImage(stack, "I2", { source: src, name: " " })).toThrow(/image name/);
     expect(() => MicrovmImageSources.fromS3Uri("https://b/k")).toThrow(/S3 URI/);
     // IAM wildcards in a key would widen the object-level grant.
@@ -423,5 +518,18 @@ describe("MicrovmImage", () => {
     expect(
       () => new MicrovmImage(stack, "I6", { source: src, egressConnectors: ["bad name"] }),
     ).toThrow(/managed connector/);
+    expect(
+      () =>
+        new MicrovmImage(stack, "I7", {
+          source: src,
+          architecture: "X86_64" as ImageProps["architecture"],
+        }),
+    ).toThrow(/architecture/);
+    expect(() => new MicrovmImage(stack, "I8", { source: src, baseImageVersion: "1 2" })).toThrow(
+      /baseImageVersion/,
+    );
+    expect(() => new MicrovmImage(stack, "I9", { source: src, description: " " })).toThrow(
+      /description/,
+    );
   });
 });

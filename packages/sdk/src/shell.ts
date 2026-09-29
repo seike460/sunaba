@@ -1,8 +1,9 @@
 import { once } from "node:events";
+import { StringDecoder } from "node:string_decoder";
 import WebSocket from "ws";
 import { SunabaError, TimeoutError } from "./errors.js";
 import type { ExecOptions, ExecResult } from "./types.js";
-import { DEFAULT_MAX_OUTPUT_BYTES, shellQuote, sleep } from "./util.js";
+import { checkNumber, DEFAULT_MAX_OUTPUT_BYTES, MAX_TIMER_MS, shellQuote, sleep } from "./util.js";
 
 /** The managed shell listens inside the MicroVM on this port. */
 export const SHELL_PORT = 8022;
@@ -11,6 +12,29 @@ const ESC = String.fromCharCode(0x1b);
 const BEL = String.fromCharCode(0x07);
 
 const doneRe = (nonce: string) => new RegExp(`__SUNABA_DONE_${nonce}_(-?\\d+)__`);
+
+/**
+ * Bytes kept beyond `maxOutputBytes` so the done marker (~40 bytes) is never
+ * cut off, even when the cap is smaller than the marker itself.
+ */
+const MARKER_RESERVE = 128;
+
+/** The last `n` UTF-8 bytes of `s`, cut on a character boundary. */
+export function tailBytes(s: string, n: number): string {
+  if (n <= 0) return "";
+  // Every UTF-16 code unit takes at least one UTF-8 byte, so the last n
+  // bytes lie within the last n code units: encode only those, never the
+  // whole (possibly huge) input.
+  let t = s.length > n ? s.slice(s.length - n) : s;
+  const first = t.charCodeAt(0);
+  if (first >= 0xdc00 && first <= 0xdfff) t = t.slice(1); // half of a surrogate pair
+  const buf = Buffer.from(t, "utf8");
+  if (buf.length <= n) return t;
+  let start = buf.length - n;
+  // Skip UTF-8 continuation bytes so no character is split.
+  while (start < buf.length && ((buf[start] ?? 0) & 0xc0) === 0x80) start++;
+  return buf.toString("utf8", start);
+}
 
 // ANSI/VT escape sequences a PTY may emit: CSI, OSC, and single-ESC sequences.
 const ANSI_RE = new RegExp(
@@ -38,7 +62,7 @@ export function microvmSubprotocols(token: string, port: number): string[] {
 export interface ShellSocketOptions {
   endpoint: string;
   token: string;
-  /** Connect timeout. Default 15s. */
+  /** Connect timeout, 1 to 2^31-1 ms (else "BadTimeout"). Default 15s. */
   connectTimeoutMs?: number;
   /**
    * Override the full WebSocket URL (for tests / non-TLS endpoints).
@@ -52,9 +76,11 @@ export interface ShellSocketOptions {
  * Returns the raw WebSocket; data is a bidirectional byte stream to the shell.
  */
 export async function openShellSocket(opts: ShellSocketOptions): Promise<WebSocket> {
+  const timeout = opts.connectTimeoutMs ?? 15_000;
+  // setTimeout fires at once for NaN and for anything above 2^31-1 ms.
+  checkNumber(timeout, "connectTimeoutMs", "BadTimeout", { min: 1, max: MAX_TIMER_MS });
   const url = opts.url ?? `wss://${opts.endpoint}/shell`;
   const ws = new WebSocket(url, microvmSubprotocols(opts.token, SHELL_PORT));
-  const timeout = opts.connectTimeoutMs ?? 15_000;
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       ws.close();
@@ -105,6 +131,28 @@ async function sendChunked(ws: WebSocket, text: string): Promise<void> {
 }
 
 /**
+ * `timeoutMs` and `maxOutputBytes` with their defaults, or a SunabaError
+ * ("BadTimeout", "BadMaxOutputBytes"). Sandbox.exec() calls it too, before
+ * it mints a shell token.
+ */
+export function execLimits(opts: ExecOptions): { timeout: number; maxOutputBytes: number } {
+  const timeout = opts.timeoutMs ?? 120_000;
+  // setTimeout fires at once for NaN and for anything above 2^31-1 ms.
+  if (!(timeout >= 1 && timeout <= MAX_TIMER_MS)) {
+    throw new SunabaError("BadTimeout", `timeoutMs must be 1-${MAX_TIMER_MS}, got ${timeout}`);
+  }
+  const maxOutputBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+  // NaN or Infinity would disable the cap; a negative one loses the marker.
+  if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 0) {
+    throw new SunabaError(
+      "BadMaxOutputBytes",
+      `maxOutputBytes must be a non-negative integer, got ${maxOutputBytes}`,
+    );
+  }
+  return { timeout, maxOutputBytes };
+}
+
+/**
  * Run a command inside the MicroVM over the managed PTY shell and collect
  * its output and exit code.
  *
@@ -112,7 +160,7 @@ async function sendChunked(ws: WebSocket, text: string): Promise<void> {
  * combined stdout+stderr stream (the PTY merges them).
  */
 export async function execOverShell(opts: ShellExecOptions): Promise<ExecResult> {
-  const timeout = opts.timeoutMs ?? 120_000;
+  const { timeout, maxOutputBytes } = execLimits(opts);
   let ws: WebSocket;
   try {
     ws = await openShellSocket(opts);
@@ -135,19 +183,29 @@ export async function execOverShell(opts: ShellExecOptions): Promise<ExecResult>
     const payload = `eval "$(printf %s '${wrapped}' | base64 -d)"; ${marker}\n`;
 
     let text = "";
-    const maxOutputBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+    let textBytes = 0;
+    const done = doneRe(nonce);
+    // One decoder for the whole stream: a multi-byte character split across
+    // two binary frames would otherwise decode to U+FFFD twice.
+    const decoder = new StringDecoder("utf8");
     ws.on("message", (d: Buffer) => {
-      text += d.toString("utf8");
+      // Once the marker is in, the buffer is final: later frames (a
+      // background job still writing to the PTY) must not push it out.
+      if (done.test(text)) return;
+      const chunk = decoder.write(d);
+      text += chunk;
+      textBytes += Buffer.byteLength(chunk);
       // Keep the tail: the done marker always arrives at the end, and an
       // unbounded buffer turns output-heavy commands into O(n^2) scans.
-      if (text.length > maxOutputBytes) {
-        text = text.slice(text.length - maxOutputBytes);
+      if (textBytes > maxOutputBytes + MARKER_RESERVE && !done.test(text)) {
+        text = tailBytes(text, maxOutputBytes + MARKER_RESERVE);
+        textBytes = Buffer.byteLength(text);
       }
     });
 
     // Attach completion listeners before sending anything so a socket that
     // dies mid-setup still rejects instead of hanging.
-    const donePromise = waitForDone(ws, () => text, nonce);
+    const donePromise = waitForDone(ws, () => text, nonce, maxOutputBytes);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<never>((_r, reject) => {
       timer = setTimeout(
@@ -183,14 +241,19 @@ function commandScript(opts: ShellExecOptions): string {
  * Reads WebSocket data until the done marker appears.
  * Everything before the marker (minus echoed input and ANSI noise) is output.
  */
-function waitForDone(ws: WebSocket, getText: () => string, nonce: string): Promise<ExecResult> {
+function waitForDone(
+  ws: WebSocket,
+  getText: () => string,
+  nonce: string,
+  maxOutputBytes: number,
+): Promise<ExecResult> {
   const re = doneRe(nonce);
   return new Promise<ExecResult>((resolve, reject) => {
     const check = () => {
       const text = getText();
       const m = re.exec(text);
       if (!m) return false;
-      const raw = text.slice(0, m.index);
+      const raw = tailBytes(text.slice(0, m.index), maxOutputBytes);
       resolve({
         output: cleanOutput(raw, nonce),
         exitCode: Number(m[1]),

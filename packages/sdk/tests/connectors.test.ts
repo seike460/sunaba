@@ -26,6 +26,18 @@ describe("connectorArn", () => {
     expect(partitionForRegion("us-east-1")).toBe("aws");
   });
 
+  it("maps the isolated and sovereign partitions", () => {
+    expect(partitionForRegion("us-iso-east-1")).toBe("aws-iso");
+    expect(partitionForRegion("us-isob-east-1")).toBe("aws-iso-b");
+    expect(partitionForRegion("eu-isoe-west-1")).toBe("aws-iso-e");
+    expect(partitionForRegion("us-isof-south-1")).toBe("aws-iso-f");
+    expect(partitionForRegion("eusc-de-east-1")).toBe("aws-eusc");
+    expect(partitionForRegion("eu-west-1")).toBe("aws");
+    expect(connectorArn("HTTP_INGRESS", "eusc-de-east-1")).toBe(
+      "arn:aws-eusc:lambda:eusc-de-east-1:aws:network-connector:aws-network-connector:HTTP_INGRESS",
+    );
+  });
+
   it("passes full ARNs through", () => {
     const arn = "arn:aws:lambda:us-east-1:123456789012:network-connector:mine";
     expect(connectorArn(arn, "us-east-1")).toBe(arn);

@@ -4,14 +4,27 @@ import {
   type MicrovmImageVersionState,
   type MicrovmState,
 } from "@aws-sdk/client-lambda-microvms";
-import { StateError, TimeoutError } from "./errors.js";
+import { StateError, SunabaError, TimeoutError } from "./errors.js";
 import type { LambdaMicrovmsClientLike } from "./types.js";
-import { isNotFoundError, sleep } from "./util.js";
+import { checkNumber, isNotFoundError, MAX_TIMER_MS, sleep } from "./util.js";
 
 export interface WaitOptions {
+  /**
+   * Overall budget in ms, a finite number >= 1 (else "BadTimeout").
+   * Default 120s; 15 min for waitForImageVersion.
+   */
   timeoutMs?: number;
+  /**
+   * Delay between polls, 1 to 2^31-1 ms (else "BadInterval"). Default 800 ms;
+   * 3s for waitForImageVersion.
+   */
   intervalMs?: number;
+  /** Stops the wait with a SunabaError whose code is "Aborted". */
   signal?: AbortSignal;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new SunabaError("Aborted", "wait aborted", signal.reason);
 }
 
 async function poll<T>(
@@ -21,17 +34,27 @@ async function poll<T>(
 ): Promise<T> {
   const timeout = opts.timeoutMs ?? 120_000;
   const interval = opts.intervalMs ?? 1_000;
+  // NaN would never pass the deadline check, so the wait would never end;
+  // 0 or a negative interval would poll the API in a tight loop.
+  checkNumber(timeout, "timeoutMs", "BadTimeout", { min: 1 });
+  checkNumber(interval, "intervalMs", "BadInterval", { min: 1, max: MAX_TIMER_MS });
   const deadline = Date.now() + timeout;
   for (;;) {
-    if (opts.signal?.aborted) {
-      throw new TimeoutError("wait aborted");
+    throwIfAborted(opts.signal);
+    let value: T;
+    try {
+      value = await fn();
+    } catch (e) {
+      throwIfAborted(opts.signal);
+      throw e;
     }
-    const value = await fn();
+    // An abort while the poll was in flight wins over its result.
+    throwIfAborted(opts.signal);
     if (done(value)) return value;
     if (Date.now() > deadline) {
       throw new TimeoutError(`timed out after ${timeout}ms waiting for condition`);
     }
-    await sleep(Math.min(interval, Math.max(50, deadline - Date.now())));
+    await sleep(Math.min(interval, Math.max(50, deadline - Date.now())), opts.signal);
   }
 }
 
@@ -103,7 +126,8 @@ export async function waitForMicrovmState(
       }
       return false;
     },
-    { intervalMs: 800, ...opts },
+    // `??`, not a spread default: an explicit `undefined` keeps the default.
+    { ...opts, intervalMs: opts.intervalMs ?? 800 },
   );
 }
 
@@ -142,7 +166,11 @@ export async function waitForImageVersion(
       v.state === "DELETING" ||
       v.state === "DELETED" ||
       v.state === "DELETE_FAILED",
-    { intervalMs: 3_000, timeoutMs: 900_000, ...opts },
+    {
+      ...opts,
+      intervalMs: opts.intervalMs ?? 3_000,
+      timeoutMs: opts.timeoutMs ?? 900_000,
+    },
   );
   if (info.state !== "SUCCESSFUL") {
     throw new StateError(

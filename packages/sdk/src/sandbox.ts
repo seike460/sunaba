@@ -10,8 +10,19 @@ import {
 import WebSocket from "ws";
 import { connectorArns, ManagedEgressConnector, ManagedIngressConnector } from "./connectors.js";
 import { SunabaError } from "./errors.js";
-import { execOverShell, microvmSubprotocols, openShellSocket, pipeInteractive } from "./shell.js";
-import { AuthTokenManager, ShellTokenManager } from "./tokens.js";
+import {
+  execLimits,
+  execOverShell,
+  microvmSubprotocols,
+  openShellSocket,
+  pipeInteractive,
+} from "./shell.js";
+import {
+  AuthTokenManager,
+  checkTtlMinutes,
+  ShellTokenManager,
+  toPortSpecifications,
+} from "./tokens.js";
 import { regionForConnectors, resolveClient } from "./transport.js";
 import {
   type ClientOptions,
@@ -19,17 +30,32 @@ import {
   type ExecOptions,
   type ExecResult,
   type LambdaMicrovmsClientLike,
+  MAX_MICROVM_DURATION_SECONDS,
   type MicrovmState,
   type PortSpec,
   type RequestOptions,
   type SandboxConnectOptions,
   type SandboxCreateOptions,
 } from "./types.js";
-import { DEFAULT_MAX_OUTPUT_BYTES, isNotFoundError, required, shellQuote, sleep } from "./util.js";
+import {
+  checkNumber,
+  DEFAULT_MAX_OUTPUT_BYTES,
+  isNotFoundError,
+  MAX_TIMER_MS,
+  required,
+  shellQuote,
+  sleep,
+} from "./util.js";
 import { getMicrovm, waitForMicrovmState } from "./waiters.js";
 
 /** Methods that are safe to auto-retry after a failed request. */
 const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE"]);
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+/** Same hop limit as fetch()'s own redirect handling. */
+const MAX_REDIRECTS = 20;
+/** Headers fetch() drops when a redirect turns the request into a GET. */
+const BODY_HEADERS = ["content-type", "content-encoding", "content-language", "content-location"];
 
 // ALL_INGRESS cannot be combined with other connectors, so the default
 // uses the granular pair: HTTP for request(), SHELL for exec()/shell.
@@ -41,7 +67,8 @@ const DEFAULT_INGRESS: readonly string[] = [
 /**
  * A running (or suspended) AWS Lambda MicroVM.
  *
- * Handles the full lifecycle plus the two authenticated transports:
+ * Covers create/connect, suspend/resume and terminate, plus the two
+ * authenticated transports:
  *  - HTTPS requests to the app endpoint (`X-aws-proxy-auth` + `X-aws-proxy-port`)
  *  - the managed WebSocket PTY shell (SHELL_INGRESS, port 8022)
  */
@@ -92,6 +119,20 @@ export class Sandbox {
    * `image` may be a full ARN or an image name (resolved via ListMicrovmImages).
    */
   static async create(opts: SandboxCreateOptions): Promise<Sandbox> {
+    checkSandboxOptions(opts);
+    if (opts.maximumDurationSeconds !== undefined) {
+      checkNumber(opts.maximumDurationSeconds, "maximumDurationSeconds", "BadMaxDuration", {
+        min: 1,
+        max: MAX_MICROVM_DURATION_SECONDS,
+        integer: true,
+      });
+    }
+    if (opts.idlePolicy !== undefined) {
+      const { maxIdleDurationSeconds, suspendedDurationSeconds } = opts.idlePolicy;
+      const seconds = { min: 1, max: 28_800, integer: true };
+      checkNumber(maxIdleDurationSeconds, "maxIdleDurationSeconds", "BadIdlePolicy", seconds);
+      checkNumber(suspendedDurationSeconds, "suspendedDurationSeconds", "BadIdlePolicy", seconds);
+    }
     const client = resolveClient(opts);
     const ingress = opts.ingress ?? DEFAULT_INGRESS;
     const egress = opts.egress ?? [ManagedEgressConnector.INTERNET];
@@ -158,6 +199,7 @@ export class Sandbox {
 
   /** Attach to an existing MicroVM by ID (resuming it first if suspended). */
   static async connect(microvmId: string, opts: SandboxConnectOptions = {}): Promise<Sandbox> {
+    checkSandboxOptions(opts);
     const client = resolveClient(opts);
     // A just-created MicroVM may 404 briefly — retry a few seconds.
     let info: Awaited<ReturnType<typeof getMicrovm>> | undefined;
@@ -237,10 +279,14 @@ export class Sandbox {
 
   /**
    * Authenticated HTTPS request to the app inside the MicroVM.
-   * Adds `X-aws-proxy-auth` (JWE) and `X-aws-proxy-port` headers,
-   * refreshing the token and retrying once on 403.
+   * Adds `X-aws-proxy-auth` (JWE) and `X-aws-proxy-port` headers.
+   * Retries once on 401/403 with a fresh token, and up to twice on 429/5xx —
+   * only for idempotent methods or `retry: true`, never for a ReadableStream
+   * body. Redirects are followed only within the endpoint's origin; a 3xx to
+   * any other origin is returned as-is so the token never leaves it.
    */
   async request(path: string, opts: RequestOptions = {}): Promise<Response> {
+    if (opts.port !== undefined) checkPort(opts.port);
     const url = `https://${this.endpoint}${path.startsWith("/") ? path : `/${path}`}`;
     const headers = new Headers(opts.headers);
     if (opts.port !== undefined) headers.set("X-aws-proxy-port", String(opts.port));
@@ -254,31 +300,27 @@ export class Sandbox {
       ...(opts.body instanceof ReadableStream ? ({ duplex: "half" } as RequestInit) : {}),
       ...(opts.signal ? { signal: opts.signal } : {}),
     };
-    const drain = async (r: Response) => {
-      await r.arrayBuffer().catch(() => {}); // free the keep-alive connection
-    };
     // Auto-retry only for idempotent methods — a POST whose response was
     // lost after the side effect would otherwise execute twice. Callers
     // can opt in with `retry: true` when their endpoint is idempotent.
     const autoRetry =
       retryableBody &&
       (IDEMPOTENT_METHODS.has((opts.method ?? "GET").toUpperCase()) || opts.retry === true);
-    let res = await fetch(url, init);
+    let res = await fetchSameOrigin(url, init);
     if (res.status === 401 || res.status === 403) {
       this.auth.invalidate(); // even for stream bodies: drop the dead token
     }
     if (autoRetry && (res.status === 401 || res.status === 403)) {
       await drain(res);
       headers.set("X-aws-proxy-auth", await this.auth.get());
-      res = await fetch(url, init);
+      res = await fetchSameOrigin(url, init);
     }
     // Transient 429/5xx: up to 2 retries with light backoff.
     for (let i = 0; autoRetry && i < 2 && (res.status === 429 || res.status >= 500); i++) {
-      const retryAfter = Number(res.headers.get("retry-after") ?? 0);
+      const retryAfterMs = Math.min(retryAfterDelayMs(res.headers.get("retry-after")), 10_000);
       await drain(res);
-      const retryAfterMs = Number.isFinite(retryAfter) ? Math.min(retryAfter * 1000, 10_000) : 0;
       await sleep(Math.max(retryAfterMs, 250 * (i + 1)));
-      res = await fetch(url, init);
+      res = await fetchSameOrigin(url, init);
     }
     return res;
   }
@@ -286,7 +328,9 @@ export class Sandbox {
   /**
    * Authenticated WebSocket to an app port inside the MicroVM.
    * Auth and port selection ride on Sec-WebSocket-Protocol subprotocols.
-   * Resolves once the socket is open.
+   * Resolves once the socket is open. `port` (default 8080) must be an
+   * integer 1-65535 ("BadPort"); `timeoutMs` (default 15s) 1 to 2^31-1 ms
+   * ("BadTimeout").
    */
   async websocket(
     path: string,
@@ -294,6 +338,8 @@ export class Sandbox {
   ): Promise<import("ws").WebSocket> {
     const p = path.startsWith("/") ? path : `/${path}`;
     const timeout = opts.timeoutMs ?? 15_000;
+    checkNumber(timeout, "timeoutMs", "BadTimeout", { min: 1, max: MAX_TIMER_MS });
+    if (opts.port !== undefined) checkPort(opts.port);
     const attempt = async (): Promise<WebSocket> => {
       const token = await this.auth.get();
       const ws = new WebSocket(`wss://${this.endpoint}${p}`, [
@@ -349,6 +395,8 @@ export class Sandbox {
    * (never re-runs a command that already started executing).
    */
   async exec(command: string, opts: ExecOptions = {}): Promise<ExecResult> {
+    // Before the token: a bad option must not cost a token API call.
+    execLimits(opts);
     const attempt = () =>
       this.shellAuth.get().then((token) =>
         execOverShell({
@@ -397,7 +445,7 @@ export class Sandbox {
 
   /** Write a file inside the MicroVM (base64 over shell). */
   async writeFile(path: string, data: string | Uint8Array, opts: ExecOptions = {}): Promise<void> {
-    const b64 = Buffer.from(data as string | Uint8Array).toString("base64");
+    const b64 = Buffer.from(data).toString("base64");
     const r = await this.exec(`printf %s '${b64}' | base64 -d > ${shellQuote(path)}`, {
       timeoutMs: 60_000,
       ...opts,
@@ -412,15 +460,10 @@ export class Sandbox {
     // The shell keeps at most maxOutputBytes (default 16 MiB) and drops the
     // HEAD — a naive `base64` read would silently corrupt files over ~12 MiB.
     // Stat first, then read in dd-sized chunks under the cap.
+    // Options first, then the chunk size: both fail before the stat below
+    // mints a token or runs anything in the VM.
+    execLimits(opts);
     const cap = (opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES) - 1024; // marker margin
-    const stat = await this.exec(`wc -c < ${shellQuote(path)}`, {
-      timeoutMs: 30_000,
-      ...opts,
-    });
-    const size = Number.parseInt(stat.output.trim(), 10);
-    if (stat.exitCode !== 0 || !Number.isFinite(size)) {
-      throw new SunabaError("ReadFailed", `cannot stat ${path}: ${stat.output}`);
-    }
     // GNU base64 wraps at 76 columns: wrapped(n) ≈ enc(n) * 77/76 where
     // enc(n) = ceil(n/3)*4 — plus slack for the trailing newline.
     const chunkBytes = Math.floor((cap * 76) / 77 / 4) * 3 - 3;
@@ -430,9 +473,17 @@ export class Sandbox {
         `maxOutputBytes ${opts.maxOutputBytes} is too small for file reads`,
       );
     }
+    const stat = await this.exec(`wc -c < ${shellQuote(path)}`, {
+      timeoutMs: 30_000,
+      ...opts,
+    });
+    const size = Number.parseInt(stat.output.trim(), 10);
+    if (stat.exitCode !== 0 || !Number.isFinite(size)) {
+      throw new SunabaError("ReadFailed", `cannot stat ${path}: ${stat.output}`);
+    }
     const decode = (output: string) => Buffer.from(output.replace(/\s+/g, ""), "base64");
     if (size <= chunkBytes) {
-      const r = await this.exec(`base64 ${shellQuote(path)}`, { timeoutMs: 60_000, ...opts });
+      const r = await this.exec(`base64 < ${shellQuote(path)}`, { timeoutMs: 60_000, ...opts });
       if (r.exitCode !== 0) {
         throw new SunabaError("ReadFailed", `read ${path} failed: ${r.output}`);
       }
@@ -501,6 +552,83 @@ export class Sandbox {
       const info = await getMicrovm(this.client, this.microvmId);
       if (!info.state || !goalStates.includes(info.state)) throw e;
     }
+  }
+}
+
+/**
+ * Numeric options shared by create() and connect(), checked before any API
+ * call: found later, a bad value would fail on a MicroVM that already runs.
+ */
+function checkSandboxOptions(opts: SandboxConnectOptions): void {
+  if (opts.runTimeoutMs !== undefined) {
+    checkNumber(opts.runTimeoutMs, "runTimeoutMs", "BadTimeout", { min: 1 });
+  }
+  checkTtlMinutes(opts.tokenTtlMinutes ?? 30, "tokenTtlMinutes");
+  toPortSpecifications(opts.allowedPorts ?? ["all"]);
+}
+
+function checkPort(port: number): void {
+  checkNumber(port, "port", "BadPort", { min: 1, max: 65_535, integer: true });
+}
+
+/**
+ * Delay a `Retry-After` header asks for, in ms: delay-seconds or an
+ * HTTP-date (RFC 9110 §10.2.3). Absent or unparsable means no delay.
+ */
+function retryAfterDelayMs(value: string | null): number {
+  if (value === null) return 0;
+  const v = value.trim();
+  if (/^\d+$/.test(v)) return Number(v) * 1000;
+  const at = Date.parse(v);
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : 0;
+}
+
+/**
+ * Discard a body we won't read. The app in the VM picks its size and may
+ * never end it, so cancel instead of reading: that frees the connection
+ * without buffering anything.
+ */
+async function drain(r: Response): Promise<void> {
+  await r.body?.cancel().catch(() => {});
+}
+
+/**
+ * fetch() that follows redirects only within the origin of `url`. fetch()
+ * itself forwards custom headers such as `X-aws-proxy-auth` to whatever
+ * origin a redirect names, so any other 3xx is returned unfollowed.
+ */
+async function fetchSameOrigin(url: string, init: RequestInit): Promise<Response> {
+  const origin = new URL(url).origin;
+  let target = url;
+  let req = init;
+  for (let hops = 0; ; hops++) {
+    const res = await fetch(target, { ...req, redirect: "manual" });
+    const location = res.headers.get("location");
+    if (
+      !REDIRECT_STATUSES.has(res.status) ||
+      location === null ||
+      hops === MAX_REDIRECTS ||
+      !URL.canParse(location, target)
+    ) {
+      return res;
+    }
+    const next = new URL(location, target);
+    if (next.origin !== origin) return res;
+    // Same method rewrite as fetch(): 301/302 turn a POST into a GET, and
+    // 303 turns anything but GET/HEAD into a GET, dropping the body.
+    const method = (req.method ?? "GET").toUpperCase();
+    if (
+      ((res.status === 301 || res.status === 302) && method === "POST") ||
+      (res.status === 303 && method !== "GET" && method !== "HEAD")
+    ) {
+      const headers = new Headers(req.headers);
+      for (const name of BODY_HEADERS) headers.delete(name);
+      req = { method: "GET", headers, ...(req.signal ? { signal: req.signal } : {}) };
+    } else if (req.body instanceof ReadableStream) {
+      return res; // the first send consumed the stream; it cannot be replayed
+    }
+    await drain(res);
+    target = next.href;
   }
 }
 

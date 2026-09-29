@@ -17,7 +17,8 @@ sunaba suspend|resume|rm <id>...  # lifecycle
 sunaba status <id>                # state + endpoint
 ```
 
-Global flags: `--region`, `--profile`, `--json`, `-v/--version` (top-level only — `run`/`ls` take `--image-version`), `-h/--help`.
+Global flags: `--region`, `--profile`, `-v/--version` (top-level only — `run`/`ls` take `--image-version`), `-h/--help`.
+`--json` is per-command (`run`, `exec`, `ls`, `images`, `status`).
 Project defaults live in `sunaba.json` (`name`, `sourceDir`,
 `artifactBucket`, `buildRoleArn`, `baseImage`, `executionRoleArn`).
 

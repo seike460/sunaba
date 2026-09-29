@@ -4,17 +4,16 @@ TypeScript toolkit for **AWS Lambda MicroVMs** — Firecracker-backed,
 session-scoped, stateful sandboxes. Sandboxes in English; "sunaba" is the
 sandbox you build things in.
 
-AWS gives you the raw `lambda-microvms` API. sunaba gives you the layer on
-top that every application ends up needing:
+AWS gives you the raw `lambda-microvms` API. The table lists five jobs that
+API leaves to the caller, and the part of sunaba that does each one:
 
 | pain with the raw API | what sunaba does |
 |---|---|
 | JWE token minting, expiry, refresh | `AuthTokenManager` / `ShellTokenManager` — auto-refresh, port-scoped |
 | WebSocket PTY handshake (`create-microvm-shell-auth-token` + subprotocols) | `Sandbox.exec()` / `interactiveShell()` — agent-free commands over `SHELL_INGRESS` |
-| suspend/resume waits, reconnects | `Sandbox.suspend()/resume()/connect()` — state-aware, auto-resume |
+| suspend/resume waits, reconnects | `Sandbox.suspend()/resume()/connect()` — wait for the target state; `connect()` resumes a `SUSPENDED` VM |
 | image build pipeline (zip → S3 → create → SUCCESSFUL poll) | `buildMicrovmImage()` + `sunaba build` |
-| CloudFormation only models the image | `sunaba-cdk` L2 constructs for image, network connectors, IAM roles |
-| no high-level TypeScript SDK at all | `sunaba-sdk` — the missing one |
+| CloudFormation has only L1 resources (`AWS::Lambda::MicrovmImage`, `AWS::Lambda::NetworkConnector`) | `sunaba-cdk` L2 constructs for image, network connectors, IAM roles |
 
 ## Packages
 
@@ -28,13 +27,16 @@ top that every application ends up needing:
 ## Requirements
 
 - Node.js ≥ 20
+- The packages are ESM-only. CommonJS projects (such as the app from
+  `cdk init app --language typescript`) load them with `require(esm)`,
+  which needs Node.js ≥ 20.19 or ≥ 22.12
 - AWS credentials with Lambda MicroVMs permissions
 - A region where Lambda MicroVMs is available (e.g. `us-east-1`, `ap-northeast-1`)
 
 ## Quick start
 
 ```bash
-npm install -g sunaba-cli        # once published; locally: node packages/cli/dist/main.js
+npm install -g sunaba-cli        # or, in a built clone: node packages/cli/dist/main.js
 
 cd my-image
 sunaba init                      # writes sunaba.json + Dockerfile
@@ -43,7 +45,7 @@ sunaba build                     # zip → S3 → CreateMicrovmImage → SUCCESS
 sunaba run --rm --exec "uname -a"  # run a command; --rm deletes the VM after
 sunaba run --shell               # interactive PTY shell
 sunaba ls                        # list MicroVMs (non-terminated; --all for all)
-sunaba logs <id> --follow        # tail CloudWatch logs
+sunaba logs <id> --follow        # print CloudWatch logs, then follow new ones
 sunaba suspend <id>              # pause; auto-terminates after the VM's
                                  # suspendedDurationSeconds (default 300 s —
                                  # set --suspended at `sunaba run`, max 8 h)
@@ -62,7 +64,7 @@ import { Sandbox } from "sunaba-sdk";
 
 const sb = await Sandbox.create({
   image: "demo",                    // name resolves to the latest ACTIVE image
-  ingress: ["SHELL_INGRESS"],       // managed connector
+  ingress: ["HTTP_INGRESS", "SHELL_INGRESS"], // HTTP for request(), SHELL for exec()
   egress: ["INTERNET_EGRESS"],
   idlePolicy: {
     maxIdleDurationSeconds: 900,
@@ -86,7 +88,8 @@ Attach to an existing (or suspended) MicroVM:
 const sb = await Sandbox.connect("m-abc123");   // auto-resumes if SUSPENDED
 ```
 
-Talk HTTP to an app inside the VM (e.g. the guest agent or your server):
+Talk HTTP to an app inside the VM (e.g. the guest agent or your server).
+This needs `HTTP_INGRESS` on the MicroVM; the default ingress includes it:
 
 ```ts
 const res = await sb.request("/exec", {
@@ -94,7 +97,22 @@ const res = await sb.request("/exec", {
   port: 8080,
   body: JSON.stringify({ command: "uname -a" }),
 });
+const { exitCode, stdout } = (await res.json()) as { exitCode: number | null; stdout: string };
+console.log(Buffer.from(stdout, "base64").toString(), exitCode); // stdout/stderr are base64
 ```
+
+The endpoint token behind `request()` and `websocket()` covers every port
+by default (`allowedPorts: ["all"]`). That includes the guest agent's
+`:8080`, whose exec API has no auth of its own, and the hooks server on
+`:9000`. Scope the token to the ports you call:
+
+```ts
+const sb = await Sandbox.connect("m-abc123", { allowedPorts: [3000] });
+// also accepts ranges: [{ from: 3000, to: 3010 }]
+```
+
+`exec()` and the interactive shell use a separate shell token, so
+`allowedPorts` does not affect them.
 
 ## CDK
 
@@ -124,13 +142,15 @@ const execRole = new MicrovmExecutionRole(this, "ExecRole");
 
 `sunaba-agent` runs **inside** the MicroVM and exposes a JSON POST API:
 
-- `POST /exec` — run a command, get stdout/stderr/exit code
+- `POST /exec` — run a command, get `exitCode` and base64-encoded
+  `stdout`/`stderr` (default `timeoutMs`: 30 s)
 - `POST /fs/{read,write,list,stat,mkdir,remove,rename,copy}` — filesystem ops
 - lifecycle hooks (`SUNABA_HOOK_*` env → shell commands) on `:9000`
 
 You only need it if you want HTTP semantics or run-hooks. For plain
 command execution, the managed shell (`Sandbox.exec`) needs nothing in
-the image.
+the image. To serve the lifecycle hooks from your own app instead, use
+`startHooksServer` from `sunaba-sdk/guest`.
 
 ## Configuration
 
@@ -140,11 +160,15 @@ the image.
 {
   "name": "demo",
   "sourceDir": ".",
+  "baseImage": "al2023-1",
   "artifactBucket": "my-artifacts-bucket",
   "buildRoleArn": "arn:aws:iam::123456789012:role/microvm-build",
   "executionRoleArn": "arn:aws:iam::123456789012:role/microvm-exec"
 }
 ```
+
+`baseImage` takes a managed base image name or a full image ARN;
+`sunaba build --base-image` overrides it.
 
 Global flags: `--region`, `--profile`. `--json` is per-command
 (`run`, `exec`, `ls`, `images`, `status`). Region precedence:
@@ -162,7 +186,8 @@ npm run check        # biome
 ## Status
 
 Early — built against the Lambda MicroVMs GA API surface
-(`@aws-sdk/client-lambda-microvms`). Feedback welcome via issues.
+(`@aws-sdk/client-lambda-microvms`). Feedback welcome via issues. To
+report a vulnerability, see [SECURITY.md](SECURITY.md) instead.
 
 ## License
 
