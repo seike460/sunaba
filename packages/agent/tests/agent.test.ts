@@ -173,6 +173,7 @@ describe("exec API", () => {
     expect((await post(apiPort, "/exec", { argv: ["a"], command: "x" })).status).toBe(400);
     expect((await post(apiPort, "/exec", { argv: ["echo"], timeoutMs: -1 })).status).toBe(400);
     expect((await post(apiPort, "/exec", { argv: ["echo"], timeoutMs: 0 })).status).toBe(400);
+    expect((await post(apiPort, "/exec", { argv: ["echo"], timeoutMs: 0.5 })).status).toBe(400);
     expect((await post(apiPort, "/exec", { argv: ["echo"], timeoutMs: 4_000_000 })).status).toBe(
       400,
     );
@@ -464,11 +465,11 @@ describe("hooks server", () => {
     }
   });
 
-  it.each(["abc", "5m", "NaN", "Infinity", "0", "-5"])(
+  it.each(["abc", "5m", "NaN", "Infinity", "0", "0.5", "-5"])(
     "rejects SUNABA_HOOK_TIMEOUT_MS=%s instead of using the default",
     (value) => {
       expect(() => envHookHandlers({ SUNABA_HOOK_TIMEOUT_MS: value })).toThrow(
-        new RangeError(`SUNABA_HOOK_TIMEOUT_MS must be a positive number of ms, got '${value}'`),
+        new RangeError(`SUNABA_HOOK_TIMEOUT_MS must be a number of ms >= 1, got '${value}'`),
       );
     },
   );

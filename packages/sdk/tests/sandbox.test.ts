@@ -86,6 +86,7 @@ describe("Sandbox option checks", () => {
   it.each([
     [{ runTimeoutMs: Number.NaN }, "BadTimeout"],
     [{ runTimeoutMs: 0 }, "BadTimeout"],
+    [{ runTimeoutMs: 0.5 }, "BadTimeout"],
     [{ tokenTtlMinutes: Number.NaN }, "BadTokenTtl"],
     [{ tokenTtlMinutes: Number.POSITIVE_INFINITY }, "BadTokenTtl"],
     [{ allowedPorts: [Number.NaN] }, "BadPort"],

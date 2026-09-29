@@ -55,6 +55,7 @@ describe("Sandbox.websocket", () => {
     [{ timeoutMs: Number.NaN }, "BadTimeout"],
     [{ timeoutMs: Number.POSITIVE_INFINITY }, "BadTimeout"],
     [{ timeoutMs: -1 }, "BadTimeout"],
+    [{ timeoutMs: 0.5 }, "BadTimeout"],
   ])("rejects %o with %s before minting a token or dialing", async (opts, code) => {
     const { client, sbx } = await connect();
     await expect(sbx.websocket("/ws", opts)).rejects.toMatchObject({ code });

@@ -51,7 +51,7 @@ describe("sunaba-agentd arguments", () => {
     try {
       expect(await agentd("--host", "127.0.0.1")).toEqual({
         exited: "exit 2",
-        err: ["SUNABA_HOOK_TIMEOUT_MS must be a positive number of ms, got '5m'"],
+        err: ["SUNABA_HOOK_TIMEOUT_MS must be a number of ms >= 1, got '5m'"],
       });
     } finally {
       if (prev === undefined) delete process.env.SUNABA_HOOK_TIMEOUT_MS;

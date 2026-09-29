@@ -84,10 +84,14 @@ The first npm release since 0.1.0; it includes the 0.1.1 fix.
 - `sunaba-agent`: `startJsonServer()` and `startHooksServer()` throw a
   `RangeError` for a `maxBodyBytes` that is not a non-negative integer.
   `NaN` or `Infinity` turned the body limit off.
-- `sunaba-agent`: a `SUNABA_HOOK_TIMEOUT_MS` that is not a positive number
-  (for example `5m`) makes `envHookHandlers()` and `startAgent()` throw a
-  `RangeError`, and `sunaba-agentd` exit with code 2. It used to fall back
-  to 300000 ms. An empty value still counts as unset.
+- `sunaba-agent`: a `SUNABA_HOOK_TIMEOUT_MS` that is not a number of at
+  least 1 (for example `5m` or `0.5`) makes `envHookHandlers()` and
+  `startAgent()` throw a `RangeError`, and `sunaba-agentd` exit with
+  code 2. A value that is not a positive number used to fall back to
+  300000 ms. An empty value still counts as unset.
+- `sunaba-agent`: `POST /exec` answers 400 to a `timeoutMs` below 1, as
+  its error message (`1..3600000`) already said. 0.1.0 accepted values
+  such as `0.5`.
 
 ### Fixed
 

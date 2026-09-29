@@ -140,7 +140,7 @@ async function sendChunked(ws: WebSocket, text: string): Promise<void> {
 export async function execOverShell(opts: ShellExecOptions): Promise<ExecResult> {
   const timeout = opts.timeoutMs ?? 120_000;
   // setTimeout fires at once for NaN and for anything above 2^31-1 ms.
-  if (!(timeout > 0 && timeout <= MAX_TIMER_MS)) {
+  if (!(timeout >= 1 && timeout <= MAX_TIMER_MS)) {
     throw new SunabaError("BadTimeout", `timeoutMs must be 1-${MAX_TIMER_MS}, got ${timeout}`);
   }
   const maxOutputBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;

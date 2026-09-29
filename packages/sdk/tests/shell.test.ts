@@ -262,7 +262,7 @@ describe("execOverShell", () => {
         code: "BadMaxOutputBytes",
       });
     }
-    for (const timeoutMs of [Number.NaN, Number.POSITIVE_INFINITY, 0, -5, 2 ** 31]) {
+    for (const timeoutMs of [Number.NaN, Number.POSITIVE_INFINITY, 0, 0.5, -5, 2 ** 31]) {
       await expect(execOverShell({ ...base, timeoutMs })).rejects.toMatchObject({
         code: "BadTimeout",
       });
@@ -276,7 +276,7 @@ describe("execOverShell", () => {
     wss.on("connection", () => connections++);
     const p = port(wss);
     const base = { endpoint: `127.0.0.1:${p}`, url: `ws://127.0.0.1:${p}`, token: "tok" };
-    for (const connectTimeoutMs of [Number.NaN, Number.POSITIVE_INFINITY, 0, -5, 2 ** 31]) {
+    for (const connectTimeoutMs of [Number.NaN, Number.POSITIVE_INFINITY, 0, 0.5, -5, 2 ** 31]) {
       await expect(openShellSocket({ ...base, connectTimeoutMs })).rejects.toMatchObject({
         code: "BadTimeout",
       });

@@ -272,6 +272,7 @@ describe("buildMicrovmImage", () => {
     [{ buildTimeoutMs: Number.NaN }, "BadTimeout"],
     [{ buildTimeoutMs: Number.POSITIVE_INFINITY }, "BadTimeout"],
     [{ buildTimeoutMs: 0 }, "BadTimeout"],
+    [{ buildTimeoutMs: 0.5 }, "BadTimeout"],
   ])("rejects %o with %s before any side effect", async (bad, code) => {
     // Every call "succeeds" at once, so only the option check can fail.
     const client = new FakeMicrovmsClient(() => ({

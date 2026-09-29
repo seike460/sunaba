@@ -36,7 +36,8 @@ export interface HooksHandlers {
  * hook request fail with 503 so Lambda sees the failure.
  * `SUNABA_HOOK_TIMEOUT_MS` bounds each command (default 300_000; values
  * above 3_600_000 are clamped; Lambda enforces its own per-hook deadline
- * regardless). A value that is not a positive number throws a RangeError.
+ * regardless). A value that is not a number of at least 1 throws a
+ * RangeError.
  */
 export function envHookHandlers(env: NodeJS.ProcessEnv = process.env): HooksHandlers {
   const handlers: HooksHandlers = {};
@@ -72,8 +73,9 @@ function hookTimeoutMs(raw: string | undefined): number {
   if (raw === undefined || raw.trim() === "") return 300_000;
   const ms = Number(raw);
   // A typo ("5m", "abc") used to fall back to the default without a word.
-  if (!Number.isFinite(ms) || ms <= 0) {
-    throw new RangeError(`SUNABA_HOOK_TIMEOUT_MS must be a positive number of ms, got '${raw}'`);
+  // Below 1, runExec would reject every hook command with a 400.
+  if (!Number.isFinite(ms) || ms < 1) {
+    throw new RangeError(`SUNABA_HOOK_TIMEOUT_MS must be a number of ms >= 1, got '${raw}'`);
   }
   return Math.min(ms, MAX_TIMEOUT_MS);
 }

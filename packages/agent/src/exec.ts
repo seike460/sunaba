@@ -10,7 +10,7 @@ export interface ExecRequest {
   env?: Record<string, string>;
   /** base64-encoded stdin piped to the process. */
   stdin?: string;
-  /** Kill the process tree after N ms. Default 30_000, max 3_600_000. */
+  /** Kill the process tree after N ms, 1 to 3_600_000. Default 30_000. */
   timeoutMs?: number;
   /** Cap captured stdout/stderr each. Default 16 MiB, max 256 MiB. */
   maxOutputBytes?: number;
@@ -70,7 +70,7 @@ export async function runExec(req: ExecRequest): Promise<ExecResult> {
     throw new HttpError(400, "argv must be an array of strings");
   }
   const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
     throw new HttpError(400, `timeoutMs must be 1..${MAX_TIMEOUT_MS}`);
   }
   const maxOut = req.maxOutputBytes ?? DEFAULT_MAX_OUT;

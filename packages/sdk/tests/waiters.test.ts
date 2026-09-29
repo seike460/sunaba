@@ -230,7 +230,7 @@ describe("wait options", () => {
         : { state: "SUCCESSFUL", status: "ACTIVE" },
     );
 
-  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, -1])(
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, 0.5, -1])(
     "rejects timeoutMs %s with BadTimeout before polling",
     async (timeoutMs) => {
       const client = ready();
@@ -244,7 +244,7 @@ describe("wait options", () => {
     },
   );
 
-  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, -1, 2 ** 31])(
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, 0.5, -1, 2 ** 31])(
     "rejects intervalMs %s with BadInterval before polling",
     async (intervalMs) => {
       const client = ready();
