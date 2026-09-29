@@ -30,6 +30,11 @@ The first npm release since 0.1.0; it includes the 0.1.1 fix.
   `waitForImageVersion()` through `signal` throws a `SunabaError`
   with code `"Aborted"` instead of a `TimeoutError`. The abort also cuts
   short the wait between polls.
+- `sunaba-sdk`: `exec()` (and `readFile()`, which uses it) rejects a
+  `maxOutputBytes` that is not a non-negative integer with `BadMaxOutputBytes`,
+  and a `timeoutMs` outside 1 to 2^31-1 ms with `BadTimeout`, before
+  connecting. Such values used to disable the output cap or fire the
+  timeout at once.
 - `sunaba-sdk`: `startHooksServer()` answers 400 to a body that is not
   valid JSON and does not call the handler (0.1.0 passed `{}`). A
   handler's error is logged with `console.error`.

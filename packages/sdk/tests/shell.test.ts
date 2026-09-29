@@ -246,6 +246,30 @@ describe("execOverShell", () => {
     expect(Buffer.byteLength(res.output)).toBeLessThanOrEqual(120);
   });
 
+  it("rejects a maxOutputBytes or timeoutMs that would disable the cap or the timer", async () => {
+    let connections = 0;
+    wss = new WebSocketServer({ port: 0 });
+    wss.on("connection", () => connections++);
+    const p = port(wss);
+    const base = {
+      endpoint: `127.0.0.1:${p}`,
+      url: `ws://127.0.0.1:${p}`,
+      token: "tok",
+      command: "true",
+    };
+    for (const maxOutputBytes of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5]) {
+      await expect(execOverShell({ ...base, maxOutputBytes })).rejects.toMatchObject({
+        code: "BadMaxOutputBytes",
+      });
+    }
+    for (const timeoutMs of [Number.NaN, Number.POSITIVE_INFINITY, 0, -5, 2 ** 31]) {
+      await expect(execOverShell({ ...base, timeoutMs })).rejects.toMatchObject({
+        code: "BadTimeout",
+      });
+    }
+    expect(connections).toBe(0); // rejected before connecting
+  });
+
   it("finishes when maxOutputBytes is smaller than the done marker", async () => {
     wss = fakeShellServer((n) => `hello world\n__SUNABA_DONE_${n}_3__\n`);
     const p = port(wss);

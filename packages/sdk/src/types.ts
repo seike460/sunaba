@@ -78,7 +78,7 @@ export interface ExecResult {
 }
 
 export interface ExecOptions {
-  /** Wall-clock budget for the command. Default 120s. */
+  /** Wall-clock budget for the command, 1 to 2^31-1 ms. Default 120s. */
   timeoutMs?: number;
   /** Working directory inside the MicroVM. */
   cwd?: string;
@@ -87,7 +87,10 @@ export interface ExecOptions {
    * Default `wss://{endpoint}/shell`.
    */
   urlOverride?: string;
-  /** Cap retained shell output (bytes). Default 16 MiB; oldest data drops. */
+  /**
+   * Cap retained shell output (bytes, a non-negative integer). Default
+   * 16 MiB; oldest data drops.
+   */
   maxOutputBytes?: number;
 }
 

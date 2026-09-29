@@ -19,6 +19,9 @@ const doneRe = (nonce: string) => new RegExp(`__SUNABA_DONE_${nonce}_(-?\\d+)__`
  */
 const MARKER_RESERVE = 128;
 
+/** setTimeout's largest delay; larger values fire immediately. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 /** The last `n` UTF-8 bytes of `s`, cut on a character boundary. */
 export function tailBytes(s: string, n: number): string {
   if (n <= 0) return "";
@@ -137,6 +140,18 @@ async function sendChunked(ws: WebSocket, text: string): Promise<void> {
  */
 export async function execOverShell(opts: ShellExecOptions): Promise<ExecResult> {
   const timeout = opts.timeoutMs ?? 120_000;
+  // setTimeout fires at once for NaN and for anything above 2^31-1 ms.
+  if (!(timeout > 0 && timeout <= MAX_TIMER_MS)) {
+    throw new SunabaError("BadTimeout", `timeoutMs must be 1-${MAX_TIMER_MS}, got ${timeout}`);
+  }
+  const maxOutputBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+  // NaN or Infinity would disable the cap; a negative one loses the marker.
+  if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 0) {
+    throw new SunabaError(
+      "BadMaxOutputBytes",
+      `maxOutputBytes must be a non-negative integer, got ${maxOutputBytes}`,
+    );
+  }
   let ws: WebSocket;
   try {
     ws = await openShellSocket(opts);
@@ -160,7 +175,6 @@ export async function execOverShell(opts: ShellExecOptions): Promise<ExecResult>
 
     let text = "";
     let textBytes = 0;
-    const maxOutputBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
     const done = doneRe(nonce);
     // One decoder for the whole stream: a multi-byte character split across
     // two binary frames would otherwise decode to U+FFFD twice.
