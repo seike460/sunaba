@@ -801,10 +801,16 @@ async function resolveLogTarget(
   id: string,
 ): Promise<{ group: string; streams: string[] }> {
   const client = resolveClient(clientOpts(ctx));
+  // The image only orders the scan, so a failed lookup falls back to the
+  // full scan — and is reported only if that scan finds nothing.
+  let lookupError: unknown;
   const preferred = await getMicrovm(client, id)
     .then((i) => imageNameOf(i.imageArn))
     .then((n) => (n ? `${LOG_GROUP_PREFIX}/${n}` : undefined))
-    .catch(() => undefined);
+    .catch((e: unknown) => {
+      if (!isNotFoundError(e)) lookupError = e;
+      return undefined;
+    });
   const groups = await listManagedLogGroups(cw);
   const ordered = preferred ? [preferred, ...groups.filter((g) => g !== preferred)] : groups.sort();
   // Probe groups with bounded concurrency — a busy account can have many
@@ -831,6 +837,7 @@ async function resolveLogTarget(
     throw new Error(`no log group under ${LOG_GROUP_PREFIX} — pass --group`);
   }
   if (probeError !== undefined) throw probeError;
+  if (lookupError !== undefined) throw lookupError;
   return { group: ordered[0] as string, streams: [] };
 }
 

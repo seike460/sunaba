@@ -976,6 +976,32 @@ describe("logs", () => {
     expect(lines[0]).toContain("no log streams matching m-1");
   });
 
+  it("surfaces a GetMicrovm failure when the fallback scan finds no streams", async () => {
+    // The image lookup failing (AccessDenied, network) must not read as
+    // "this MicroVM has no logs" either.
+    const { context, client } = ctx();
+    client.failOnce(
+      "GetMicrovmCommand",
+      awsError("AccessDeniedException", "not authorized: GetMicrovm"),
+    );
+    await expect(
+      cmdLogs(parseArgs(["nope"]), { ...context, logsClient: new FakeLogs() }),
+    ).rejects.toThrow(/not authorized: GetMicrovm/);
+  });
+
+  it("a failed GetMicrovm still falls back to scanning every managed group", async () => {
+    const { context, client } = ctx();
+    client.failOnce("GetMicrovmCommand", awsError("AccessDeniedException", "not authorized"));
+    const lines: string[] = [];
+    const code = await cmdLogs(parseArgs(["m-1"]), {
+      ...context,
+      logsClient: new FakeLogs(),
+      out: (l) => lines.push(l),
+    });
+    expect(code).toBe(0);
+    expect(lines.map((l) => l.replace(/^\S+ /, ""))).toEqual(["a", "b"]);
+  });
+
   it("prefers the VM's image-specific log group over unrelated groups", async () => {
     // Multiple managed groups exist; the target stream lives only in the
     // image-specific one (image name "demo" comes from the VM's imageArn).
