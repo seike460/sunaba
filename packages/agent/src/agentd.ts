@@ -71,9 +71,15 @@ try {
   process.exit(2);
 }
 
-console.log(
-  `[sunaba-agentd] api listening on ${args.host}:${args.port}` +
-    (servers.hooks ? `, hooks on :${args.hooksPort}` : ""),
+// Say "listening" only once both servers are: a port in use fails later,
+// through onError, which exits 1.
+servers.ready.then(
+  () =>
+    console.log(
+      `[sunaba-agentd] api listening on ${args.host}:${args.port}` +
+        (servers.hooks ? `, hooks on :${args.hooksPort}` : ""),
+    ),
+  () => {},
 );
 
 const shutdown = () => {

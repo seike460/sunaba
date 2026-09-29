@@ -24,6 +24,13 @@ The first npm release since 0.1.0; it includes the 0.1.1 fix.
   `s3:GetObjectVersion` on the source object only. It no longer gets
   `s3:List*` and `s3:GetBucket*` on the whole bucket.
 
+### Added
+
+- `sunaba-agent`: `startAgent()` returns a `ready` promise. It resolves
+  once every server it started listens. If one cannot listen, for example
+  because the port is in use, it closes the others and rejects with that
+  error.
+
 ### Changed
 
 - `sunaba-sdk`: aborting `waitForMicrovmState()` or
@@ -107,8 +114,13 @@ The first npm release since 0.1.0; it includes the 0.1.1 fix.
 - `sunaba-cli`: `sunaba logs` reports a `DescribeLogStreams` or
   `GetMicrovm` error such as AccessDenied instead of treating it as "no
   log stream".
-- `sunaba-agent`: `startAgent()` no longer leaves the API server listening
-  when the hooks server fails to start.
+- `sunaba-agent`: `startAgent()` no longer leaves one server listening
+  when the other fails to start. This covers a port already in use
+  (`EADDRINUSE`), which `listen()` reports only after `startAgent()`
+  returns.
+- `sunaba-agent`: `sunaba-agentd` says it is listening only once both
+  servers are. When a port is in use, it prints the listen error and exits
+  with code 1, without a "listening" line first.
 - `sunaba-agent`: `/fs/copy` gives a copied single file the source's mode.
 - `sunaba-agent`: `/fs/copy` answers 400 instead of 500 when the copy
   meets a FIFO, a socket or mismatched file types.

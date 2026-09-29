@@ -1,3 +1,5 @@
+import { once } from "node:events";
+import { type AddressInfo, createServer } from "node:net";
 import { describe, expect, it, vi } from "vitest";
 
 /**
@@ -67,5 +69,124 @@ describe("sunaba-agentd arguments", () => {
       exited: "exit 2",
       err: ["unknown argument: --bogus"],
     });
+  });
+});
+
+/** A server holding a port on 127.0.0.1, as another process would. */
+async function occupy(): Promise<{ port: number; release(): Promise<void> }> {
+  const blocker = createServer().listen(0, "127.0.0.1");
+  await once(blocker, "listening");
+  const { port } = blocker.address() as AddressInfo;
+  return { port, release: () => new Promise<void>((r) => blocker.close(() => r())) };
+}
+
+/** A TCP port nothing listens on right now. */
+async function freePort(): Promise<number> {
+  const taken = await occupy();
+  await taken.release();
+  return taken.port;
+}
+
+/**
+ * Start `sunaba-agentd` with `argv` in this process. process.exit only
+ * records the code in `exitCode`; `sigterm()` runs its SIGTERM handler.
+ * `restore()` undoes the mocks and removes the signal handlers it added.
+ */
+async function startAgentd(...argv: string[]) {
+  const out: string[] = [];
+  const err: string[] = [];
+  const before = { SIGTERM: process.listeners("SIGTERM"), SIGINT: process.listeners("SIGINT") };
+  const added = (name: "SIGTERM" | "SIGINT") =>
+    process.listeners(name).filter((l) => !before[name].includes(l));
+  let exited: (code: unknown) => void = () => {};
+  const exitCode = new Promise<unknown>((r) => {
+    exited = r;
+  });
+  const mocks = [
+    vi.spyOn(process, "exit").mockImplementation(((c?: number) => {
+      exited(c);
+    }) as typeof process.exit),
+    vi.spyOn(console, "log").mockImplementation((...a) => void out.push(a.join(" "))),
+    vi.spyOn(console, "error").mockImplementation((...a) => void err.push(a.map(String).join(" "))),
+  ];
+  const prevArgv = process.argv;
+  process.argv = ["node", "sunaba-agentd", ...argv];
+  vi.resetModules();
+  try {
+    await import("../src/agentd.js");
+  } finally {
+    process.argv = prevArgv;
+  }
+  return {
+    out,
+    err,
+    exitCode,
+    sigterm: () => {
+      for (const l of added("SIGTERM")) (l as () => void)();
+    },
+    restore: () => {
+      for (const m of mocks) m.mockRestore();
+      for (const name of ["SIGTERM", "SIGINT"] as const) {
+        for (const l of added(name)) process.off(name, l);
+      }
+    },
+  };
+}
+
+describe("sunaba-agentd startup", () => {
+  it.each(["--port", "--hooks-port"])(
+    "exits 1 with the listen error, and never says listening, when %s is in use",
+    async (flag) => {
+      const taken = await occupy();
+      const ports: Record<string, number> = {
+        "--port": await freePort(),
+        "--hooks-port": await freePort(),
+        [flag]: taken.port,
+      };
+      const agentd = await startAgentd(
+        ...["--host", "127.0.0.1", "--port", String(ports["--port"])],
+        ...["--hooks-port", String(ports["--hooks-port"])],
+      );
+      try {
+        expect(await agentd.exitCode).toBe(1);
+        expect(agentd.err.join("\n")).toContain(
+          `listen EADDRINUSE: address already in use 127.0.0.1:${taken.port}`,
+        );
+        // Give a late "listening" log the chance to show up.
+        await new Promise((r) => setTimeout(r, 50));
+        expect(agentd.out).toEqual([]);
+      } finally {
+        agentd.restore();
+        await taken.release();
+      }
+    },
+  );
+
+  it("says listening only once both servers are, and frees both ports on SIGTERM", async () => {
+    const port = await freePort();
+    const hooksPort = await freePort();
+    const agentd = await startAgentd(
+      ...["--host", "127.0.0.1", "--port", String(port), "--hooks-port", String(hooksPort)],
+    );
+    try {
+      expect(agentd.out).toEqual([]);
+      await vi.waitFor(() =>
+        expect(agentd.out).toEqual([
+          `[sunaba-agentd] api listening on 127.0.0.1:${port}, hooks on :${hooksPort}`,
+        ]),
+      );
+      // shutdown arms a 3 s fallback exit; keep it from firing in this process.
+      vi.useFakeTimers({ toFake: ["setTimeout"] });
+      agentd.sigterm();
+      expect(await agentd.exitCode).toBe(0);
+      for (const p of [port, hooksPort]) {
+        const again = createServer().listen(p, "127.0.0.1");
+        await once(again, "listening"); // rejects with EADDRINUSE if left open
+        await new Promise<void>((r) => again.close(() => r()));
+      }
+    } finally {
+      vi.useRealTimers();
+      agentd.restore();
+    }
   });
 });

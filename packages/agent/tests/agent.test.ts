@@ -521,6 +521,14 @@ async function freePort(): Promise<number> {
   return port;
 }
 
+/** A server holding a port on 127.0.0.1, as another process would. */
+async function occupy(): Promise<{ port: number; release(): Promise<void> }> {
+  const blocker = createServer().listen(0, "127.0.0.1");
+  await once(blocker, "listening");
+  const { port } = blocker.address() as AddressInfo;
+  return { port, release: () => new Promise<void>((r) => blocker.close(() => r())) };
+}
+
 /** Resolves when `port` can be bound again, i.e. no server was left on it. */
 async function expectFree(port: number): Promise<void> {
   await new Promise((r) => setImmediate(r));
@@ -563,6 +571,61 @@ describe("server options", () => {
     await expectFree(port);
   });
 
+  it.each([
+    [
+      "startJsonServer",
+      (port: number, onError: (e: Error) => void) =>
+        startJsonServer({ routes: {}, port, host: "127.0.0.1", onError }),
+    ],
+    [
+      "startHooksServer",
+      (port: number, onError: (e: Error) => void) =>
+        startHooksServer({}, { port, host: "127.0.0.1", onError }),
+    ],
+  ])("%s hands a port already in use to onError", async (_name, start) => {
+    const taken = await occupy();
+    try {
+      const onError = vi.fn();
+      const server = start(taken.port, onError);
+      const [err] = await once(server, "error");
+      expect(err).toMatchObject({ code: "EADDRINUSE", port: taken.port });
+      expect(onError).toHaveBeenCalledWith(err);
+      expect(server.listening).toBe(false);
+    } finally {
+      await taken.release();
+    }
+  });
+
+  it("closes the API server when the hooks port is already in use", async () => {
+    const taken = await occupy();
+    try {
+      const port = await freePort();
+      const onError = vi.fn();
+      const s = startAgent({ port, hooksPort: taken.port, host: "127.0.0.1", hooks: {}, onError });
+      await expect(s.ready).rejects.toMatchObject({ code: "EADDRINUSE", port: taken.port });
+      expect(onError).toHaveBeenCalledWith(expect.objectContaining({ code: "EADDRINUSE" }));
+      expect(s.api.listening).toBe(false);
+      await expectFree(port);
+    } finally {
+      await taken.release();
+    }
+  });
+
+  it("closes the hooks server when the API port is already in use", async () => {
+    const taken = await occupy();
+    try {
+      const hooksPort = await freePort();
+      const onError = vi.fn();
+      const s = startAgent({ port: taken.port, hooksPort, host: "127.0.0.1", hooks: {}, onError });
+      await expect(s.ready).rejects.toMatchObject({ code: "EADDRINUSE", port: taken.port });
+      expect(onError).toHaveBeenCalledWith(expect.objectContaining({ code: "EADDRINUSE" }));
+      expect(s.hooks?.listening).toBe(false);
+      await expectFree(hooksPort);
+    } finally {
+      await taken.release();
+    }
+  });
+
   it("checks SUNABA_HOOK_TIMEOUT_MS before the API server listens", async () => {
     const prev = process.env.SUNABA_HOOK_TIMEOUT_MS;
     process.env.SUNABA_HOOK_TIMEOUT_MS = "5m";
@@ -583,6 +646,14 @@ describe("agent wiring", () => {
     await new Promise((r) => setImmediate(r));
     const port = addr(s.api);
     expect((await fetch(`http://127.0.0.1:${port}/healthz`)).status).toBe(200);
+    await s.close();
+  });
+
+  it("ready resolves once both servers listen", async () => {
+    const s = startAgent({ port: 0, hooksPort: 0, host: "127.0.0.1", hooks: {} });
+    await s.ready;
+    expect(s.api.listening).toBe(true);
+    expect(s.hooks?.listening).toBe(true);
     await s.close();
   });
 

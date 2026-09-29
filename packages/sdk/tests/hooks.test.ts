@@ -1,6 +1,6 @@
 import { once } from "node:events";
 import type { Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { type AddressInfo, createServer } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { startHooksServer } from "../src/guest/hooks.js";
 
@@ -116,6 +116,22 @@ describe("startHooksServer", () => {
       }).toThrow(expect.objectContaining({ code: "ERR_SOCKET_BAD_PORT" }));
     },
   );
+
+  it("hands a port already in use to onError and does not listen", async () => {
+    const blocker = createServer().listen(0, "127.0.0.1");
+    await once(blocker, "listening");
+    const { port } = blocker.address() as AddressInfo;
+    try {
+      const onError = vi.fn();
+      server = startHooksServer({}, { port, host: "127.0.0.1", onError });
+      const [err] = await once(server, "error");
+      expect(err).toMatchObject({ code: "EADDRINUSE", port });
+      expect(onError).toHaveBeenCalledWith(err);
+      expect(server.listening).toBe(false);
+    } finally {
+      await new Promise<void>((r) => blocker.close(() => r()));
+    }
+  });
 
   it("answers 413 to any non-empty body when maxBodyBytes is 0", async () => {
     const onRun = vi.fn();
