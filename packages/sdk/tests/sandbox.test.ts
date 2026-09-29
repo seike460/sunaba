@@ -335,6 +335,51 @@ describe("Sandbox.request", () => {
     expect(seen[1]?.headers["x-aws-proxy-port"]).toBe("3000");
   });
 
+  it.each([
+    [301, { location: "/next" }],
+    [403, {}],
+    [503, {}],
+  ])("cancels a never-ending %i body instead of reading it", async (status, headers) => {
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull: () => new Promise<void>(() => {}), // the app never sends the rest
+      cancel: () => {
+        cancelled = true;
+      },
+    });
+    let calls = 0;
+    vi.stubGlobal("fetch", async () =>
+      ++calls === 1 ? new Response(body, { status, headers }) : new Response("ok"),
+    );
+    const res = await sbx.request("/");
+    expect(await res.text()).toBe("ok");
+    expect(calls).toBe(2);
+    expect(cancelled).toBe(true);
+  });
+
+  it("does not buffer a large redirect body before following it", async () => {
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    const chunk = new Uint8Array(1024 * 1024);
+    let pulled = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull: (c) => {
+        if (pulled >= 64 * chunk.length) return c.close();
+        pulled += chunk.length;
+        c.enqueue(chunk);
+      },
+    });
+    let calls = 0;
+    vi.stubGlobal("fetch", async () =>
+      ++calls === 1
+        ? new Response(body, { status: 302, headers: { location: "/next" } })
+        : new Response("ok"),
+    );
+    expect(await (await sbx.request("/")).text()).toBe("ok");
+    // At most what the stream queues up front, not the 64 MiB.
+    expect(pulled).toBeLessThanOrEqual(2 * chunk.length);
+  });
+
   it("turns a POST into a body-less GET on a same-origin 303, like fetch()", async () => {
     const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
     const seen: RequestInit[] = [];

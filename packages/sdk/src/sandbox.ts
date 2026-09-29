@@ -572,9 +572,13 @@ function retryAfterDelayMs(value: string | null): number {
   return Number.isFinite(at) ? Math.max(0, at - Date.now()) : 0;
 }
 
-/** Read and discard a body to free the keep-alive connection. */
+/**
+ * Discard a body we won't read. The app in the VM picks its size and may
+ * never end it, so cancel instead of reading: that frees the connection
+ * without buffering anything.
+ */
 async function drain(r: Response): Promise<void> {
-  await r.arrayBuffer().catch(() => {});
+  await r.body?.cancel().catch(() => {});
 }
 
 /**

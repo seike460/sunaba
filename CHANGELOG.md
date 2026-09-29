@@ -17,6 +17,11 @@ The first npm release since 0.1.0; it includes the 0.1.1 fix.
   on the endpoint's origin. A 3xx to another origin, including a
   downgrade to `http:`, is returned to the caller, so the auth token is
   never sent to another host.
+- `sunaba-sdk`: `Sandbox.request()` cancels the body of a response it
+  does not return (a redirect it follows, or a 401/403, 429 or 5xx it
+  retries) instead of reading it into memory. The app in the VM chose
+  that body, and a very large or never-ending one could use up memory or
+  stop `request()` for good.
 - `sunaba-cli`: `sunaba logs` removes control characters from log
   messages before printing them. Code inside the VM writes those messages.
 - `sunaba-cdk`: for `MicrovmImageSources.fromBucket()` and
