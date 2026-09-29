@@ -311,9 +311,8 @@ export class Sandbox {
     }
     // Transient 429/5xx: up to 2 retries with light backoff.
     for (let i = 0; autoRetry && i < 2 && (res.status === 429 || res.status >= 500); i++) {
-      const retryAfter = Number(res.headers.get("retry-after") ?? 0);
+      const retryAfterMs = Math.min(retryAfterDelayMs(res.headers.get("retry-after")), 10_000);
       await drain(res);
-      const retryAfterMs = Number.isFinite(retryAfter) ? Math.min(retryAfter * 1000, 10_000) : 0;
       await sleep(Math.max(retryAfterMs, 250 * (i + 1)));
       res = await fetchSameOrigin(url, init);
     }
@@ -559,6 +558,18 @@ function checkSandboxOptions(opts: SandboxConnectOptions): void {
 
 function checkPort(port: number): void {
   checkNumber(port, "port", "BadPort", { min: 1, max: 65_535, integer: true });
+}
+
+/**
+ * Delay a `Retry-After` header asks for, in ms: delay-seconds or an
+ * HTTP-date (RFC 9110 §10.2.3). Absent or unparsable means no delay.
+ */
+function retryAfterDelayMs(value: string | null): number {
+  if (value === null) return 0;
+  const v = value.trim();
+  if (/^\d+$/.test(v)) return Number(v) * 1000;
+  const at = Date.parse(v);
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : 0;
 }
 
 /** Read and discard a body to free the keep-alive connection. */

@@ -232,6 +232,44 @@ describe("Sandbox.request", () => {
     expect(calls).toBe(2);
   });
 
+  it("waits for an HTTP-date Retry-After before retrying a 429", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    // HTTP-dates have 1 s resolution: this one lies 2-3 s ahead.
+    const at = new Date(Date.now() + 3_000).toUTCString();
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response(null, { status: 429, headers: { "retry-after": at } })
+        : new Response("ok");
+    });
+    const pending = sbx.request("/health");
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect((await pending).status).toBe(200);
+    expect(calls).toBe(2);
+  });
+
+  it("falls back to the backoff for an unparsable Retry-After", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const sbx = await Sandbox.create({ image: ARN, client: makeClient(), region: "us-east-1" });
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response(null, { status: 503, headers: { "retry-after": "soon" } })
+        : new Response("ok");
+    });
+    const pending = sbx.request("/health");
+    await vi.advanceTimersByTimeAsync(249);
+    expect(calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await pending).status).toBe(200);
+    expect(calls).toBe(2);
+  });
+
   it("never auto-retries a non-idempotent POST (lost-response double-execute)", async () => {
     const sbx = await Sandbox.create({
       image: ARN,

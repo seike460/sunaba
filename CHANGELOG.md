@@ -77,6 +77,8 @@ The first npm release since 0.1.0; it includes the 0.1.1 fix.
 
 ### Fixed
 
+- `sunaba-sdk`: `Sandbox.request()` honors a `Retry-After` given as an
+  HTTP-date, not only as seconds, before retrying a 429 or 5xx.
 - All packages: the `LICENSE` files contain the unmodified Apache License
   2.0 text. The 0.1.0 tarballs shipped a modified text that did not match
   the declared `Apache-2.0` license.
