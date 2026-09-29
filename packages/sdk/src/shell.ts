@@ -3,7 +3,7 @@ import { StringDecoder } from "node:string_decoder";
 import WebSocket from "ws";
 import { SunabaError, TimeoutError } from "./errors.js";
 import type { ExecOptions, ExecResult } from "./types.js";
-import { DEFAULT_MAX_OUTPUT_BYTES, shellQuote, sleep } from "./util.js";
+import { DEFAULT_MAX_OUTPUT_BYTES, MAX_TIMER_MS, shellQuote, sleep } from "./util.js";
 
 /** The managed shell listens inside the MicroVM on this port. */
 export const SHELL_PORT = 8022;
@@ -18,9 +18,6 @@ const doneRe = (nonce: string) => new RegExp(`__SUNABA_DONE_${nonce}_(-?\\d+)__`
  * cut off, even when the cap is smaller than the marker itself.
  */
 const MARKER_RESERVE = 128;
-
-/** setTimeout's largest delay; larger values fire immediately. */
-const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /** The last `n` UTF-8 bytes of `s`, cut on a character boundary. */
 export function tailBytes(s: string, n: number): string {

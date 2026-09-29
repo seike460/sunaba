@@ -204,4 +204,57 @@ describe("waitForImageVersion", () => {
       /build exploded/,
     );
   });
+
+  it("keeps the 15 min default when timeoutMs is passed as undefined", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let n = 0;
+    const client = new FakeMicrovmsClient(() => {
+      vi.setSystemTime(Date.now() + 200_000); // each poll takes 200 s
+      return { state: n++ < 2 ? "IN_PROGRESS" : "SUCCESSFUL" };
+    });
+    const info = await waitForImageVersion(client, "arn:img", "1.0", {
+      timeoutMs: undefined,
+      intervalMs: 1,
+    });
+    expect(info.state).toBe("SUCCESSFUL");
+    expect(client.calls).toHaveLength(3);
+  });
+});
+
+describe("wait options", () => {
+  // The client already reports the target state: only validation can fail.
+  const ready = () =>
+    new FakeMicrovmsClient((cmd: { constructor: { name: string } }) =>
+      cmd.constructor.name === "GetMicrovmCommand"
+        ? { microvmId: "mvm-1", state: "RUNNING" }
+        : { state: "SUCCESSFUL", status: "ACTIVE" },
+    );
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, -1])(
+    "rejects timeoutMs %s with BadTimeout before polling",
+    async (timeoutMs) => {
+      const client = ready();
+      await expect(
+        waitForMicrovmState(client, "mvm-1", "RUNNING", { timeoutMs }),
+      ).rejects.toMatchObject({ code: "BadTimeout" });
+      await expect(
+        waitForImageVersion(client, "arn:img", "1.0", { timeoutMs }),
+      ).rejects.toMatchObject({ code: "BadTimeout" });
+      expect(client.calls).toHaveLength(0);
+    },
+  );
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, -1, 2 ** 31])(
+    "rejects intervalMs %s with BadInterval before polling",
+    async (intervalMs) => {
+      const client = ready();
+      await expect(
+        waitForMicrovmState(client, "mvm-1", "RUNNING", { intervalMs }),
+      ).rejects.toMatchObject({ code: "BadInterval" });
+      await expect(
+        waitForImageVersion(client, "arn:img", "1.0", { intervalMs }),
+      ).rejects.toMatchObject({ code: "BadInterval" });
+      expect(client.calls).toHaveLength(0);
+    },
+  );
 });
