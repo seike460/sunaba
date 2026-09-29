@@ -13,6 +13,22 @@ const BEL = String.fromCharCode(0x07);
 
 const doneRe = (nonce: string) => new RegExp(`__SUNABA_DONE_${nonce}_(-?\\d+)__`);
 
+/**
+ * Bytes kept beyond `maxOutputBytes` so the done marker (~40 bytes) is never
+ * cut off, even when the cap is smaller than the marker itself.
+ */
+const MARKER_RESERVE = 128;
+
+/** The last `n` UTF-8 bytes of `s`, cut on a character boundary. */
+function tailBytes(s: string, n: number): string {
+  const buf = Buffer.from(s, "utf8");
+  if (buf.length <= n) return s;
+  let start = Math.max(0, buf.length - n);
+  // Skip UTF-8 continuation bytes so no character is split.
+  while (start < buf.length && ((buf[start] ?? 0) & 0xc0) === 0x80) start++;
+  return buf.toString("utf8", start);
+}
+
 // ANSI/VT escape sequences a PTY may emit: CSI, OSC, and single-ESC sequences.
 const ANSI_RE = new RegExp(
   `${ESC}\\[[0-9;?]*[a-zA-Z]|${ESC}\\][^${BEL}${ESC}]*(?:${BEL}|${ESC}\\\\)|${ESC}[@-_]`,
@@ -138,28 +154,28 @@ export async function execOverShell(opts: ShellExecOptions): Promise<ExecResult>
     let text = "";
     let textBytes = 0;
     const maxOutputBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+    const done = doneRe(nonce);
     // One decoder for the whole stream: a multi-byte character split across
     // two binary frames would otherwise decode to U+FFFD twice.
     const decoder = new StringDecoder("utf8");
     ws.on("message", (d: Buffer) => {
+      // Once the marker is in, the buffer is final: later frames (a
+      // background job still writing to the PTY) must not push it out.
+      if (done.test(text)) return;
       const chunk = decoder.write(d);
       text += chunk;
       textBytes += Buffer.byteLength(chunk);
       // Keep the tail: the done marker always arrives at the end, and an
       // unbounded buffer turns output-heavy commands into O(n^2) scans.
-      if (textBytes > maxOutputBytes) {
-        const buf = Buffer.from(text, "utf8");
-        let start = buf.length - maxOutputBytes;
-        // Cut on a character boundary (skip UTF-8 continuation bytes).
-        while (start < buf.length && ((buf[start] ?? 0) & 0xc0) === 0x80) start++;
-        text = buf.toString("utf8", start);
-        textBytes = buf.length - start;
+      if (textBytes > maxOutputBytes + MARKER_RESERVE && !done.test(text)) {
+        text = tailBytes(text, maxOutputBytes + MARKER_RESERVE);
+        textBytes = Buffer.byteLength(text);
       }
     });
 
     // Attach completion listeners before sending anything so a socket that
     // dies mid-setup still rejects instead of hanging.
-    const donePromise = waitForDone(ws, () => text, nonce);
+    const donePromise = waitForDone(ws, () => text, nonce, maxOutputBytes);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<never>((_r, reject) => {
       timer = setTimeout(
@@ -195,14 +211,19 @@ function commandScript(opts: ShellExecOptions): string {
  * Reads WebSocket data until the done marker appears.
  * Everything before the marker (minus echoed input and ANSI noise) is output.
  */
-function waitForDone(ws: WebSocket, getText: () => string, nonce: string): Promise<ExecResult> {
+function waitForDone(
+  ws: WebSocket,
+  getText: () => string,
+  nonce: string,
+  maxOutputBytes: number,
+): Promise<ExecResult> {
   const re = doneRe(nonce);
   return new Promise<ExecResult>((resolve, reject) => {
     const check = () => {
       const text = getText();
       const m = re.exec(text);
       if (!m) return false;
-      const raw = text.slice(0, m.index);
+      const raw = tailBytes(text.slice(0, m.index), maxOutputBytes);
       resolve({
         output: cleanOutput(raw, nonce),
         exitCode: Number(m[1]),

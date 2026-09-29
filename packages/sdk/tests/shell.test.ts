@@ -225,6 +225,38 @@ describe("execOverShell", () => {
     expect(Buffer.byteLength(res.output)).toBeLessThanOrEqual(120);
   });
 
+  it("finishes when maxOutputBytes is smaller than the done marker", async () => {
+    wss = fakeShellServer((n) => `hello world\n__SUNABA_DONE_${n}_3__\n`);
+    const p = port(wss);
+    const res = await execOverShell({
+      endpoint: `127.0.0.1:${p}`,
+      url: `ws://127.0.0.1:${p}`,
+      token: "tok",
+      command: "true",
+      timeoutMs: 2_000,
+      maxOutputBytes: 4,
+    });
+    expect(res.exitCode).toBe(3);
+    expect(Buffer.byteLength(res.output)).toBeLessThanOrEqual(4);
+    expect("hello world".endsWith(res.output)).toBe(true);
+  });
+
+  it("keeps the done marker when more output follows it in the same frame", async () => {
+    // A background job may keep writing after the command finished.
+    wss = fakeShellServer((n) => `out\n__SUNABA_DONE_${n}_0__\n${"z".repeat(500)}`);
+    const p = port(wss);
+    const res = await execOverShell({
+      endpoint: `127.0.0.1:${p}`,
+      url: `ws://127.0.0.1:${p}`,
+      token: "tok",
+      command: "true",
+      timeoutMs: 2_000,
+      maxOutputBytes: 64,
+    });
+    expect(res.exitCode).toBe(0);
+    expect(res.output).toBe("out");
+  });
+
   it("decodes a multi-byte character split across binary frames", async () => {
     wss = new WebSocketServer({ port: 0 });
     wss.on("connection", (ws) => {
