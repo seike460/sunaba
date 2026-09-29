@@ -59,7 +59,7 @@ export interface HooksServerOptions {
 }
 
 /**
- * Starts a tiny HTTP server implementing the MicroVM lifecycle hooks.
+ * Starts a node:http server that implements the MicroVM lifecycle hooks.
  * Returns the Server (caller may also keep a reference for shutdown).
  * A handler that throws gets 503 (the error goes to console.error); a
  * body that isn't valid JSON gets 400 without invoking the handler.

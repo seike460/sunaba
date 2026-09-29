@@ -4,14 +4,14 @@ TypeScript toolkit for **AWS Lambda MicroVMs** — Firecracker-backed,
 session-scoped, stateful sandboxes. Sandboxes in English; "sunaba" is the
 sandbox you build things in.
 
-AWS gives you the raw `lambda-microvms` API. sunaba gives you the layer on
-top that every application ends up needing:
+AWS gives you the raw `lambda-microvms` API. The table lists five jobs that
+API leaves to the caller, and the part of sunaba that does each one:
 
 | pain with the raw API | what sunaba does |
 |---|---|
 | JWE token minting, expiry, refresh | `AuthTokenManager` / `ShellTokenManager` — auto-refresh, port-scoped |
 | WebSocket PTY handshake (`create-microvm-shell-auth-token` + subprotocols) | `Sandbox.exec()` / `interactiveShell()` — agent-free commands over `SHELL_INGRESS` |
-| suspend/resume waits, reconnects | `Sandbox.suspend()/resume()/connect()` — state-aware, auto-resume |
+| suspend/resume waits, reconnects | `Sandbox.suspend()/resume()/connect()` — wait for the target state; `connect()` resumes a `SUSPENDED` VM |
 | image build pipeline (zip → S3 → create → SUCCESSFUL poll) | `buildMicrovmImage()` + `sunaba build` |
 | CloudFormation has only L1 resources (`AWS::Lambda::MicrovmImage`, `AWS::Lambda::NetworkConnector`) | `sunaba-cdk` L2 constructs for image, network connectors, IAM roles |
 

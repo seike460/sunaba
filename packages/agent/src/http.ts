@@ -111,9 +111,10 @@ export interface JsonServerOptions {
 }
 
 /**
- * Minimal JSON-over-POST HTTP server for the in-guest agent. All handlers
- * receive the parsed JSON body and may return a JSON-serializable value
- * (or write the response themselves and return undefined).
+ * JSON-over-POST HTTP server for the in-guest agent, built on node:http
+ * alone. All handlers receive the parsed JSON body and may return a
+ * JSON-serializable value (or write the response themselves and return
+ * undefined).
  * Route keys are "METHOD /path"; a key ending in "/*" matches any path
  * under that prefix and passes the remainder to the handler.
  */

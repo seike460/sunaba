@@ -61,7 +61,8 @@ const DEFAULT_INGRESS: readonly string[] = [
 /**
  * A running (or suspended) AWS Lambda MicroVM.
  *
- * Handles the full lifecycle plus the two authenticated transports:
+ * Covers create/connect, suspend/resume and terminate, plus the two
+ * authenticated transports:
  *  - HTTPS requests to the app endpoint (`X-aws-proxy-auth` + `X-aws-proxy-port`)
  *  - the managed WebSocket PTY shell (SHELL_INGRESS, port 8022)
  */

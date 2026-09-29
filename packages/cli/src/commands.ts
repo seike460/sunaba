@@ -816,7 +816,7 @@ async function resolveLogTarget(
   // Probe groups with bounded concurrency — a busy account can have many
   // managed groups and a sequential scan would be slow.
   const CONCURRENCY = 4;
-  // A group deleted mid-scan simply has no streams. Any other probe
+  // A group deleted mid-scan has no streams. Any other probe
   // failure (AccessDenied, throttling) only matters when no group yields
   // the streams — then it, not "no log streams", is the real cause.
   let probeError: unknown;
