@@ -20,10 +20,17 @@ const doneRe = (nonce: string) => new RegExp(`__SUNABA_DONE_${nonce}_(-?\\d+)__`
 const MARKER_RESERVE = 128;
 
 /** The last `n` UTF-8 bytes of `s`, cut on a character boundary. */
-function tailBytes(s: string, n: number): string {
-  const buf = Buffer.from(s, "utf8");
-  if (buf.length <= n) return s;
-  let start = Math.max(0, buf.length - n);
+export function tailBytes(s: string, n: number): string {
+  if (n <= 0) return "";
+  // Every UTF-16 code unit takes at least one UTF-8 byte, so the last n
+  // bytes lie within the last n code units: encode only those, never the
+  // whole (possibly huge) input.
+  let t = s.length > n ? s.slice(s.length - n) : s;
+  const first = t.charCodeAt(0);
+  if (first >= 0xdc00 && first <= 0xdfff) t = t.slice(1); // half of a surrogate pair
+  const buf = Buffer.from(t, "utf8");
+  if (buf.length <= n) return t;
+  let start = buf.length - n;
   // Skip UTF-8 continuation bytes so no character is split.
   while (start < buf.length && ((buf[start] ?? 0) & 0xc0) === 0x80) start++;
   return buf.toString("utf8", start);

@@ -1,8 +1,8 @@
 import { type AddressInfo, createServer, type Server, type Socket } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { TimeoutError } from "../src/errors.js";
-import { execOverShell, microvmSubprotocols } from "../src/shell.js";
+import { execOverShell, microvmSubprotocols, tailBytes } from "../src/shell.js";
 
 /** Fake PTY end: extracts the nonce from the marker in the payload and answers. */
 function fakeShellServer(script: (nonce: string) => string) {
@@ -28,6 +28,27 @@ describe("microvmSubprotocols", () => {
       "lambda-microvms.authentication.TOK",
       "lambda-microvms.port.9000",
     ]);
+  });
+});
+
+describe("tailBytes", () => {
+  it("encodes only the tail, never the whole input", () => {
+    const spy = vi.spyOn(Buffer, "from");
+    try {
+      expect(tailBytes(`${"x".repeat(1_000_000)}abc`, 3)).toBe("abc");
+      const encoded = spy.mock.calls.map((c) => (typeof c[0] === "string" ? c[0].length : 0));
+      expect(Math.max(0, ...encoded)).toBeLessThanOrEqual(3);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("keeps whole characters and never starts with half a surrogate pair", () => {
+    expect(tailBytes("a😀b", 5)).toBe("😀b");
+    expect(tailBytes("a😀b", 4)).toBe("b");
+    expect(tailBytes("xx😀", 3)).toBe("");
+    expect(tailBytes("x😀", 1)).toBe("");
+    expect(tailBytes("abc", 0)).toBe("");
   });
 });
 
@@ -239,6 +260,22 @@ describe("execOverShell", () => {
     expect(res.exitCode).toBe(3);
     expect(Buffer.byteLength(res.output)).toBeLessThanOrEqual(4);
     expect("hello world".endsWith(res.output)).toBe(true);
+  });
+
+  it("caps a single frame far larger than maxOutputBytes, keeping whole characters", async () => {
+    const big = `${"x".repeat(2_000_000)}${"😀".repeat(10)}`;
+    wss = fakeShellServer((n) => `${big}\n__SUNABA_DONE_${n}_0__\n`);
+    const p = port(wss);
+    const res = await execOverShell({
+      endpoint: `127.0.0.1:${p}`,
+      url: `ws://127.0.0.1:${p}`,
+      token: "tok",
+      command: "true",
+      timeoutMs: 5_000,
+      maxOutputBytes: 11, // 2 whole emoji (8 bytes) + "\n"; a third would be split
+    });
+    expect(res.exitCode).toBe(0);
+    expect(res.output).toBe("😀😀");
   });
 
   it("keeps the done marker when more output follows it in the same frame", async () => {
