@@ -795,8 +795,10 @@ describe("Sandbox.exec via fake shell", () => {
   });
 
   it("readFile rejects a too-small maxOutputBytes instead of looping", async () => {
+    let connections = 0;
     const wss = new WebSocketServer({ port: 0 });
     wss.on("connection", (ws) => {
+      connections++;
       ws.on("message", (data: Buffer) => {
         const text = data.toString();
         const m = /__SUNABA_DONE_([a-z0-9]+)_%d__/.exec(text);
@@ -805,21 +807,49 @@ describe("Sandbox.exec via fake shell", () => {
     });
     const port = (wss.address() as AddressInfo).port;
     try {
-      const sbx = await Sandbox.create({
-        image: ARN,
-        client: makeClient(),
-        region: "us-east-1",
-      });
+      const client = makeClient();
+      const sbx = await Sandbox.create({ image: ARN, client, region: "us-east-1" });
       await expect(
         sbx.readFile("/x", {
           urlOverride: `ws://127.0.0.1:${port}`,
           maxOutputBytes: 1024,
         }),
       ).rejects.toThrow(/too small/);
+      // Known before the stat: no shell token, nothing run in the VM.
+      expect(client.callsOf("CreateMicrovmShellAuthTokenCommand")).toHaveLength(0);
+      expect(connections).toBe(0);
     } finally {
       wss.close();
     }
   });
+
+  it.each([
+    [{ timeoutMs: Number.NaN }, "BadTimeout"],
+    [{ timeoutMs: 0.5 }, "BadTimeout"],
+    [{ timeoutMs: 2 ** 31 }, "BadTimeout"],
+    [{ maxOutputBytes: Number.NaN }, "BadMaxOutputBytes"],
+    [{ maxOutputBytes: -1 }, "BadMaxOutputBytes"],
+    [{ maxOutputBytes: 1.5 }, "BadMaxOutputBytes"],
+  ])(
+    "exec, writeFile and readFile reject %o with %s before minting a shell token",
+    async (bad, code) => {
+      let connections = 0;
+      const wss = new WebSocketServer({ port: 0 });
+      wss.on("connection", () => connections++);
+      const opts = { urlOverride: `ws://127.0.0.1:${(wss.address() as AddressInfo).port}`, ...bad };
+      try {
+        const client = makeClient();
+        const sbx = await Sandbox.create({ image: ARN, client, region: "us-east-1" });
+        await expect(sbx.exec("true", opts)).rejects.toMatchObject({ code });
+        await expect(sbx.writeFile("/x", "hi", opts)).rejects.toMatchObject({ code });
+        await expect(sbx.readFile("/x", opts)).rejects.toMatchObject({ code });
+        expect(client.callsOf("CreateMicrovmShellAuthTokenCommand")).toHaveLength(0);
+        expect(connections).toBe(0);
+      } finally {
+        wss.close();
+      }
+    },
+  );
 
   it("readFile throws when chunks come back short (truncation is not silent)", async () => {
     const wss = new WebSocketServer({ port: 0 });

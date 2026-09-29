@@ -131,13 +131,11 @@ async function sendChunked(ws: WebSocket, text: string): Promise<void> {
 }
 
 /**
- * Run a command inside the MicroVM over the managed PTY shell and collect
- * its output and exit code.
- *
- * The command is base64-encoded to survive shell quoting. Output is the
- * combined stdout+stderr stream (the PTY merges them).
+ * `timeoutMs` and `maxOutputBytes` with their defaults, or a SunabaError
+ * ("BadTimeout", "BadMaxOutputBytes"). Sandbox.exec() calls it too, before
+ * it mints a shell token.
  */
-export async function execOverShell(opts: ShellExecOptions): Promise<ExecResult> {
+export function execLimits(opts: ExecOptions): { timeout: number; maxOutputBytes: number } {
   const timeout = opts.timeoutMs ?? 120_000;
   // setTimeout fires at once for NaN and for anything above 2^31-1 ms.
   if (!(timeout >= 1 && timeout <= MAX_TIMER_MS)) {
@@ -151,6 +149,18 @@ export async function execOverShell(opts: ShellExecOptions): Promise<ExecResult>
       `maxOutputBytes must be a non-negative integer, got ${maxOutputBytes}`,
     );
   }
+  return { timeout, maxOutputBytes };
+}
+
+/**
+ * Run a command inside the MicroVM over the managed PTY shell and collect
+ * its output and exit code.
+ *
+ * The command is base64-encoded to survive shell quoting. Output is the
+ * combined stdout+stderr stream (the PTY merges them).
+ */
+export async function execOverShell(opts: ShellExecOptions): Promise<ExecResult> {
+  const { timeout, maxOutputBytes } = execLimits(opts);
   let ws: WebSocket;
   try {
     ws = await openShellSocket(opts);

@@ -63,11 +63,14 @@ The first npm release since 0.1.0; it includes the 0.1.1 fix.
 - `sunaba-sdk`: `buildMicrovmImage()` rejects a `memoryMiB` that is not a
   positive integer (`BadMemory`) and a `buildTimeoutMs` below 1
   (`BadTimeout`) before it uploads anything.
-- `sunaba-sdk`: `exec()` (and `readFile()`, which uses it) rejects a
-  `maxOutputBytes` that is not a non-negative integer with `BadMaxOutputBytes`,
-  and a `timeoutMs` outside 1 to 2^31-1 ms with `BadTimeout`, before
-  connecting. Such values used to disable the output cap or fire the
-  timeout at once.
+- `sunaba-sdk`: `exec()` (and `readFile()` and `writeFile()`, which use
+  it) rejects a `maxOutputBytes` that is not a non-negative integer with
+  `BadMaxOutputBytes`, and a `timeoutMs` outside 1 to 2^31-1 ms with
+  `BadTimeout`, before it requests a shell token or connects. Such values
+  used to disable the output cap or fire the timeout at once.
+  `execOverShell()` checks the same options before it connects.
+  `readFile()` also rejects a `maxOutputBytes` too small for file reads
+  before it runs anything in the VM.
 - `sunaba-sdk`: `startHooksServer()` answers 400 to a body that is not
   valid JSON and does not call the handler (0.1.0 passed `{}`). A
   handler's error is logged with `console.error`.

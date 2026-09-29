@@ -10,7 +10,13 @@ import {
 import WebSocket from "ws";
 import { connectorArns, ManagedEgressConnector, ManagedIngressConnector } from "./connectors.js";
 import { SunabaError } from "./errors.js";
-import { execOverShell, microvmSubprotocols, openShellSocket, pipeInteractive } from "./shell.js";
+import {
+  execLimits,
+  execOverShell,
+  microvmSubprotocols,
+  openShellSocket,
+  pipeInteractive,
+} from "./shell.js";
 import {
   AuthTokenManager,
   checkTtlMinutes,
@@ -389,6 +395,8 @@ export class Sandbox {
    * (never re-runs a command that already started executing).
    */
   async exec(command: string, opts: ExecOptions = {}): Promise<ExecResult> {
+    // Before the token: a bad option must not cost a token API call.
+    execLimits(opts);
     const attempt = () =>
       this.shellAuth.get().then((token) =>
         execOverShell({
@@ -452,15 +460,10 @@ export class Sandbox {
     // The shell keeps at most maxOutputBytes (default 16 MiB) and drops the
     // HEAD — a naive `base64` read would silently corrupt files over ~12 MiB.
     // Stat first, then read in dd-sized chunks under the cap.
+    // Options first, then the chunk size: both fail before the stat below
+    // mints a token or runs anything in the VM.
+    execLimits(opts);
     const cap = (opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES) - 1024; // marker margin
-    const stat = await this.exec(`wc -c < ${shellQuote(path)}`, {
-      timeoutMs: 30_000,
-      ...opts,
-    });
-    const size = Number.parseInt(stat.output.trim(), 10);
-    if (stat.exitCode !== 0 || !Number.isFinite(size)) {
-      throw new SunabaError("ReadFailed", `cannot stat ${path}: ${stat.output}`);
-    }
     // GNU base64 wraps at 76 columns: wrapped(n) ≈ enc(n) * 77/76 where
     // enc(n) = ceil(n/3)*4 — plus slack for the trailing newline.
     const chunkBytes = Math.floor((cap * 76) / 77 / 4) * 3 - 3;
@@ -469,6 +472,14 @@ export class Sandbox {
         "ReadFailed",
         `maxOutputBytes ${opts.maxOutputBytes} is too small for file reads`,
       );
+    }
+    const stat = await this.exec(`wc -c < ${shellQuote(path)}`, {
+      timeoutMs: 30_000,
+      ...opts,
+    });
+    const size = Number.parseInt(stat.output.trim(), 10);
+    if (stat.exitCode !== 0 || !Number.isFinite(size)) {
+      throw new SunabaError("ReadFailed", `cannot stat ${path}: ${stat.output}`);
     }
     const decode = (output: string) => Buffer.from(output.replace(/\s+/g, ""), "base64");
     if (size <= chunkBytes) {
