@@ -50,6 +50,9 @@ The first npm release since 0.1.0; it includes the 0.1.1 fix.
   declaration maps point to.
 - `sunaba-sdk`: `exec()` decodes a UTF-8 character split across
   WebSocket frames, and `maxOutputBytes` counts UTF-8 bytes.
+- `sunaba-sdk`: `exec()` no longer times out when `maxOutputBytes` is
+  smaller than its completion marker, or when a background job keeps
+  writing to the shell after the command ends.
 - `sunaba-sdk`: `readFile()` reads a path that starts with `-`.
 - `sunaba-sdk`: `buildMicrovmImage()` surfaces errors other than
   not-found (throttling, AccessDenied) while listing the image's existing
