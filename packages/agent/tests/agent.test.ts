@@ -13,7 +13,7 @@ import {
   truncateSync,
   writeFileSync,
 } from "node:fs";
-import type { IncomingMessage, Server } from "node:http";
+import { request as httpRequest, type IncomingMessage, type Server } from "node:http";
 import { type AddressInfo, connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -614,28 +614,67 @@ describe("agent wiring", () => {
     }
   });
 
-  it("drops a request whose body stalls for 60 s", async () => {
+  it("answers 408 and closes the connection when a request body stalls for 60 s", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    // Content-Length promises 10 bytes; only "{" is ever sent. The client
+    // asks for keep-alive, so the close must come from the server.
+    const client = httpRequest({
+      host: "127.0.0.1",
+      port: apiPort,
+      method: "POST",
+      path: "/exec",
+      agent: false,
+      headers: { connection: "keep-alive", "content-length": "10" },
+    });
+    try {
+      client.on("error", () => {});
+      const response = once(client, "response") as Promise<[IncomingMessage]>;
+      // The handler arms the body timer synchronously, before this listener runs.
+      const request = once(servers.api, "request") as Promise<[IncomingMessage]>;
+      client.write("{");
+      const [req] = await request;
+      const closed = once(req.socket, "close");
+      vi.advanceTimersByTime(59_999);
+      expect(req.socket.bytesWritten).toBe(0);
+      vi.advanceTimersByTime(1);
+      const [res] = await response;
+      expect(res.statusCode).toBe(408);
+      expect(res.headers.connection).toBe("close");
+      expect(res.headers["content-type"]).toBe("application/json");
+      const body: Buffer[] = [];
+      for await (const c of res) body.push(c as Buffer);
+      expect(JSON.parse(Buffer.concat(body).toString())).toEqual({
+        error: { code: "RequestTimeout", message: "request body timed out" },
+      });
+      // The server closes the connection by itself once the 408 is out.
+      await closed;
+    } finally {
+      vi.useRealTimers();
+      client.destroy();
+    }
+  });
+
+  it("closes a timed-out connection 5 s after the 408 even if Node keeps it open", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const sock = connect(apiPort, "127.0.0.1");
     try {
-      const reply = new Promise<string>((resolve) => {
-        let data = "";
-        sock.on("data", (c) => {
-          data += c;
-        });
-        sock.on("error", () => {});
-        sock.on("close", () => resolve(data));
+      sock.on("error", () => {});
+      const first = new Promise<string>((resolve) => {
+        sock.once("data", (c) => resolve(String(c)));
+        sock.once("close", () => resolve(""));
       });
-      // The handler arms the body timer synchronously, before this listener runs.
       const request = once(servers.api, "request") as Promise<[IncomingMessage]>;
       sock.write("POST /exec HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\n{");
       const [req] = await request;
-      vi.advanceTimersByTime(59_999);
-      expect(req.destroyed).toBe(false);
+      // Stands in for a client that never reads: the close Node does after
+      // the reply is flushed never comes.
+      req.socket.destroySoon = () => {};
+      vi.advanceTimersByTime(60_000);
+      expect(await first).toMatch(/^HTTP\/1\.1 408 /);
+      vi.advanceTimersByTime(4_999);
+      expect(req.socket.destroyed).toBe(false);
       vi.advanceTimersByTime(1);
-      expect(req.destroyed).toBe(true);
-      // req.destroy() drops the socket before the 408 is written.
-      expect(await reply).toBe("");
+      expect(req.socket.destroyed).toBe(true);
     } finally {
       vi.useRealTimers();
       sock.destroy();

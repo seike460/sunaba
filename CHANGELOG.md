@@ -110,6 +110,10 @@ The first npm release since 0.1.0; it includes the 0.1.1 fix.
 - `sunaba-agent`: `/fs/copy` gives a copied single file the source's mode.
 - `sunaba-agent`: `/fs/copy` answers 400 instead of 500 when the copy
   meets a FIFO, a socket or mismatched file types.
+- `sunaba-agent`: a request whose body stalls for 60 s gets a `408` with
+  a JSON error (`RequestTimeout`) and `Connection: close`, and then the
+  server closes the connection. It used to close the connection without
+  an answer.
 
 ## [0.1.1] — 2026-09-28
 

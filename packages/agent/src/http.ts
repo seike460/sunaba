@@ -75,8 +75,8 @@ const ERRNO_STATUS: Record<string, number> = {
 };
 
 function sendError(res: ServerResponse, err: unknown): void {
-  // The socket may already be dead (client abort, request timeout) — writing
-  // would throw inside the catch path and crash the process.
+  // The socket may already be dead (client abort, closeAllConnections) —
+  // writing would throw inside the catch path and crash the process.
   if (res.destroyed || res.writableEnded) return;
   try {
     if (err instanceof HttpError) {
@@ -166,7 +166,15 @@ export function startJsonServer(opts: JsonServerOptions): Server {
           readJsonBody(req, maxBodyBytes),
           new Promise<never>((_, reject) => {
             bodyTimer = setTimeout(() => {
-              req.destroy();
+              // Answer, then close: destroying the request here would drop
+              // the socket before sendError writes the 408. `Connection:
+              // close` makes Node end the socket once the reply is flushed;
+              // the cap covers a client that never reads it.
+              res.setHeader("connection", "close");
+              const socket = req.socket;
+              const cap = setTimeout(() => socket.destroy(), 5_000);
+              cap.unref();
+              socket.once("close", () => clearTimeout(cap));
               reject(new HttpError(408, "request body timed out"));
             }, 60_000);
             bodyTimer.unref();
