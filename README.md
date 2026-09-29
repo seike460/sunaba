@@ -64,7 +64,7 @@ import { Sandbox } from "sunaba-sdk";
 
 const sb = await Sandbox.create({
   image: "demo",                    // name resolves to the latest ACTIVE image
-  ingress: ["SHELL_INGRESS"],       // managed connector
+  ingress: ["HTTP_INGRESS", "SHELL_INGRESS"], // HTTP for request(), SHELL for exec()
   egress: ["INTERNET_EGRESS"],
   idlePolicy: {
     maxIdleDurationSeconds: 900,
@@ -88,7 +88,8 @@ Attach to an existing (or suspended) MicroVM:
 const sb = await Sandbox.connect("m-abc123");   // auto-resumes if SUSPENDED
 ```
 
-Talk HTTP to an app inside the VM (e.g. the guest agent or your server):
+Talk HTTP to an app inside the VM (e.g. the guest agent or your server).
+This needs `HTTP_INGRESS` on the MicroVM; the default ingress includes it:
 
 ```ts
 const res = await sb.request("/exec", {
