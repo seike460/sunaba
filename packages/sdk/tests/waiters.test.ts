@@ -120,6 +120,39 @@ describe("waitForMicrovmState", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("aborts during an in-flight poll even when it returns the target state", async () => {
+    let answer: (v: unknown) => void = () => {};
+    const client = new FakeMicrovmsClient(
+      () => new Promise((resolve) => (answer = resolve)), // GetMicrovm stays pending
+    );
+    const ac = new AbortController();
+    const reason = new Error("caller gave up");
+    const waiting = waitForMicrovmState(client, "mvm-1", "RUNNING", {
+      intervalMs: 1,
+      signal: ac.signal,
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(client.calls).toHaveLength(1); // the poll is in flight
+    ac.abort(reason);
+    answer({ microvmId: "mvm-1", state: "RUNNING" });
+    await expect(waiting).rejects.toMatchObject({ code: "Aborted", cause: reason });
+    expect(client.calls).toHaveLength(1);
+  });
+
+  it("reports an abort, not the error, when an in-flight poll fails", async () => {
+    let fail: (e: unknown) => void = () => {};
+    const client = new FakeMicrovmsClient(() => new Promise((_r, reject) => (fail = reject)));
+    const ac = new AbortController();
+    const waiting = waitForMicrovmState(client, "mvm-1", "RUNNING", {
+      intervalMs: 1,
+      signal: ac.signal,
+    });
+    await new Promise((r) => setImmediate(r));
+    ac.abort();
+    fail(new Error("socket hang up"));
+    await expect(waiting).rejects.toMatchObject({ code: "Aborted" });
+  });
+
   it("accepts TERMINATED when the target is TERMINATING", async () => {
     const client = new FakeMicrovmsClient(() => ({
       microvmId: "mvm-1",

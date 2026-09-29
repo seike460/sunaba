@@ -15,6 +15,10 @@ export interface WaitOptions {
   signal?: AbortSignal;
 }
 
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new SunabaError("Aborted", "wait aborted", signal.reason);
+}
+
 async function poll<T>(
   fn: () => Promise<T>,
   done: (v: T) => boolean,
@@ -24,10 +28,16 @@ async function poll<T>(
   const interval = opts.intervalMs ?? 1_000;
   const deadline = Date.now() + timeout;
   for (;;) {
-    if (opts.signal?.aborted) {
-      throw new SunabaError("Aborted", "wait aborted", opts.signal.reason);
+    throwIfAborted(opts.signal);
+    let value: T;
+    try {
+      value = await fn();
+    } catch (e) {
+      throwIfAborted(opts.signal);
+      throw e;
     }
-    const value = await fn();
+    // An abort while the poll was in flight wins over its result.
+    throwIfAborted(opts.signal);
     if (done(value)) return value;
     if (Date.now() > deadline) {
       throw new TimeoutError(`timed out after ${timeout}ms waiting for condition`);
