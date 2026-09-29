@@ -989,6 +989,20 @@ describe("logs", () => {
     ).rejects.toThrow(/not authorized: GetMicrovm/);
   });
 
+  it("surfaces a GetMicrovm failure instead of 'no log group' when none is listed", async () => {
+    const { context, client } = ctx();
+    client.failOnce(
+      "GetMicrovmCommand",
+      awsError("AccessDeniedException", "not authorized: GetMicrovm"),
+    );
+    await expect(
+      cmdLogs(parseArgs(["m-1"]), {
+        ...context,
+        logsClient: new ProbeFailLogs([], () => undefined),
+      }),
+    ).rejects.toThrow(/not authorized: GetMicrovm/);
+  });
+
   it("a failed GetMicrovm still falls back to scanning every managed group", async () => {
     const { context, client } = ctx();
     client.failOnce("GetMicrovmCommand", awsError("AccessDeniedException", "not authorized"));

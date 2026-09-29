@@ -833,11 +833,13 @@ async function resolveLogTarget(
     const hit = batch.find((b) => b.streams.length);
     if (hit) return hit;
   }
+  // A failed lookup or probe explains an empty result better than the
+  // result itself, including "no log group at all".
+  if (probeError !== undefined) throw probeError;
+  if (lookupError !== undefined) throw lookupError;
   if (!ordered.length) {
     throw new Error(`no log group under ${LOG_GROUP_PREFIX} — pass --group`);
   }
-  if (probeError !== undefined) throw probeError;
-  if (lookupError !== undefined) throw lookupError;
   return { group: ordered[0] as string, streams: [] };
 }
 
