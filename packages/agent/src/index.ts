@@ -36,6 +36,14 @@ export interface AgentServers {
  * unless disabled, a lifecycle hook server on `hooksPort` (9000).
  */
 export function startAgent(opts: AgentOptions = {}): AgentServers {
+  // Resolve the hooks first: a bad SUNABA_HOOK_TIMEOUT_MS must throw
+  // before any server is listening.
+  const handlers =
+    opts.hooks === false
+      ? undefined
+      : opts.hooks === "env" || opts.hooks === undefined
+        ? envHookHandlers()
+        : opts.hooks;
   const api = startJsonServer({
     port: opts.port ?? 8080,
     host: opts.host,
@@ -48,14 +56,18 @@ export function startAgent(opts: AgentOptions = {}): AgentServers {
   });
 
   let hooksServer: Server | undefined;
-  if (opts.hooks !== false) {
-    const handlers =
-      opts.hooks === "env" || opts.hooks === undefined ? envHookHandlers() : opts.hooks;
-    hooksServer = startHooksServer(handlers, {
-      port: opts.hooksPort ?? 9000,
-      host: opts.hooksHost ?? opts.host,
-      onError: opts.onError,
-    });
+  if (handlers) {
+    try {
+      hooksServer = startHooksServer(handlers, {
+        port: opts.hooksPort ?? 9000,
+        host: opts.hooksHost ?? opts.host,
+        onError: opts.onError,
+      });
+    } catch (e) {
+      // e.g. listen() rejecting the hooks port: don't leave the API listening.
+      api.close();
+      throw e;
+    }
   }
 
   return {

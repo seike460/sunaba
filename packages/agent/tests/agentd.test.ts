@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 /**
  * Run the `sunaba-agentd` entry point with `argv`; agentd.ts parses its
- * arguments on import. Only invalid arguments are passed, so parsing exits
- * before any server starts.
+ * arguments on import. Only invalid arguments or settings are passed, so
+ * agentd exits before any server starts.
  */
 async function agentd(...argv: string[]) {
   const err: string[] = [];
@@ -41,6 +41,20 @@ describe("sunaba-agentd arguments", () => {
       exited: "exit 2",
       err: ["invalid --hooks-port: 65536"],
     });
+  });
+
+  it("exits 2 on an invalid SUNABA_HOOK_TIMEOUT_MS", async () => {
+    const prev = process.env.SUNABA_HOOK_TIMEOUT_MS;
+    process.env.SUNABA_HOOK_TIMEOUT_MS = "5m";
+    try {
+      expect(await agentd("--host", "127.0.0.1")).toEqual({
+        exited: "exit 2",
+        err: ["SUNABA_HOOK_TIMEOUT_MS must be a positive number of ms, got '5m'"],
+      });
+    } finally {
+      if (prev === undefined) delete process.env.SUNABA_HOOK_TIMEOUT_MS;
+      else process.env.SUNABA_HOOK_TIMEOUT_MS = prev;
+    }
   });
 
   it("exits 2 on a missing value or an unknown argument", async () => {

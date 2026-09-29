@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { checkNumber } from "../util.js";
 
 /**
  * Lifecycle hook contract for Lambda MicroVMs.
@@ -50,7 +51,10 @@ export interface HooksServerOptions {
   host?: string;
   /** Called on listen errors (e.g. EADDRINUSE) instead of crashing. */
   onError?: (err: Error) => void;
-  /** Max accepted body size in bytes. Default 1 MiB. */
+  /**
+   * Max accepted body size in bytes, a non-negative integer (else a
+   * SunabaError "BadMaxBodyBytes"). Default 1 MiB.
+   */
   maxBodyBytes?: number;
 }
 
@@ -61,6 +65,10 @@ export interface HooksServerOptions {
  * body that isn't valid JSON gets 400 without invoking the handler.
  */
 export function startHooksServer(handlers: HooksHandlers, opts: HooksServerOptions = {}): Server {
+  const maxBodyBytes = opts.maxBodyBytes ?? 1_048_576;
+  // NaN or Infinity never trips `size > maxBytes`: bodies would buffer
+  // without limit.
+  checkNumber(maxBodyBytes, "maxBodyBytes", "BadMaxBodyBytes", { min: 0, integer: true });
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     // A malformed Host header makes `new URL` throw — answer 400, never crash.
     let url: URL;
@@ -84,7 +92,7 @@ export function startHooksServer(handlers: HooksHandlers, opts: HooksServerOptio
     }
     let body: unknown;
     try {
-      body = await readJson(req, opts.maxBodyBytes ?? 1_048_576);
+      body = await readJson(req, maxBodyBytes);
     } catch (e) {
       const status = e instanceof BodyTooLarge ? 413 : e instanceof InvalidJson ? 400 : 503;
       res.writeHead(status).end();

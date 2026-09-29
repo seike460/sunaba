@@ -14,11 +14,17 @@ import {
   writeFileSync,
 } from "node:fs";
 import type { IncomingMessage, Server } from "node:http";
-import { connect } from "node:net";
+import { type AddressInfo, connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { type AgentServers, envHookHandlers, startAgent } from "../src/index.js";
+import {
+  type AgentServers,
+  envHookHandlers,
+  startAgent,
+  startHooksServer,
+  startJsonServer,
+} from "../src/index.js";
 
 let servers: AgentServers;
 let apiPort: number;
@@ -458,6 +464,20 @@ describe("hooks server", () => {
     }
   });
 
+  it.each(["abc", "5m", "NaN", "Infinity", "0", "-5"])(
+    "rejects SUNABA_HOOK_TIMEOUT_MS=%s instead of using the default",
+    (value) => {
+      expect(() => envHookHandlers({ SUNABA_HOOK_TIMEOUT_MS: value })).toThrow(
+        new RangeError(`SUNABA_HOOK_TIMEOUT_MS must be a positive number of ms, got '${value}'`),
+      );
+    },
+  );
+
+  it("treats an empty SUNABA_HOOK_TIMEOUT_MS as unset", () => {
+    const handlers = envHookHandlers({ SUNABA_HOOK_TIMEOUT_MS: "", SUNABA_HOOK_RUN: "true" });
+    expect(typeof handlers.run).toBe("function");
+  });
+
   it("env hooks execute shell commands", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "sunaba-hooks-"));
     const marker = path.join(dir, "hook-ran");
@@ -489,6 +509,71 @@ describe("hooks server", () => {
   it("404s outside the hook prefix", async () => {
     const res = await post(hooksPort, "/nope", {});
     expect(res.status).toBe(404);
+  });
+});
+
+/** A TCP port nothing listens on right now. */
+async function freePort(): Promise<number> {
+  const probe = createServer().listen(0, "127.0.0.1");
+  await once(probe, "listening");
+  const { port } = probe.address() as AddressInfo;
+  await new Promise<void>((r) => probe.close(() => r()));
+  return port;
+}
+
+/** Resolves when `port` can be bound again, i.e. no server was left on it. */
+async function expectFree(port: number): Promise<void> {
+  await new Promise((r) => setImmediate(r));
+  const again = createServer().listen(port, "127.0.0.1");
+  await once(again, "listening"); // rejects with EADDRINUSE otherwise
+  await new Promise<void>((r) => again.close(() => r()));
+}
+
+describe("server options", () => {
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5])(
+    "rejects maxBodyBytes %s before listening",
+    (maxBodyBytes) => {
+      const started: Server[] = [];
+      try {
+        const opts = { port: 0, host: "127.0.0.1", maxBodyBytes };
+        expect(() => started.push(startJsonServer({ ...opts, routes: {} }))).toThrow(
+          new RangeError(`maxBodyBytes must be a non-negative integer, got ${maxBodyBytes}`),
+        );
+        expect(() => started.push(startHooksServer({}, opts))).toThrow(RangeError);
+      } finally {
+        for (const s of started) s.close();
+      }
+    },
+  );
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, 65_536])(
+    "rejects port %s when it starts (listen() validates it)",
+    (port) => {
+      expect(() => startJsonServer({ routes: {}, port, host: "127.0.0.1" })).toThrow(
+        expect.objectContaining({ code: "ERR_SOCKET_BAD_PORT" }),
+      );
+    },
+  );
+
+  it("leaves no API server listening when the hooks server cannot start", async () => {
+    const port = await freePort();
+    expect(() => startAgent({ port, hooksPort: Number.NaN, host: "127.0.0.1", hooks: {} })).toThrow(
+      expect.objectContaining({ code: "ERR_SOCKET_BAD_PORT" }),
+    );
+    await expectFree(port);
+  });
+
+  it("checks SUNABA_HOOK_TIMEOUT_MS before the API server listens", async () => {
+    const prev = process.env.SUNABA_HOOK_TIMEOUT_MS;
+    process.env.SUNABA_HOOK_TIMEOUT_MS = "5m";
+    try {
+      const port = await freePort();
+      expect(() => startAgent({ port, hooksPort: 0, host: "127.0.0.1" })).toThrow(RangeError);
+      await expectFree(port);
+    } finally {
+      if (prev === undefined) delete process.env.SUNABA_HOOK_TIMEOUT_MS;
+      else process.env.SUNABA_HOOK_TIMEOUT_MS = prev;
+    }
   });
 });
 

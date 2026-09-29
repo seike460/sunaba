@@ -53,16 +53,23 @@ function parseArgs(argv: string[]): {
 }
 
 const args = parseArgs(process.argv.slice(2));
-const servers = startAgent({
-  port: args.port,
-  host: args.host,
-  hooks: args.hooks ? "env" : false,
-  hooksPort: args.hooksPort,
-  onError: (e) => {
-    console.error("[sunaba-agentd]", e);
-    process.exit(1);
-  },
-});
+let servers: ReturnType<typeof startAgent>;
+try {
+  servers = startAgent({
+    port: args.port,
+    host: args.host,
+    hooks: args.hooks ? "env" : false,
+    hooksPort: args.hooksPort,
+    onError: (e) => {
+      console.error("[sunaba-agentd]", e);
+      process.exit(1);
+    },
+  });
+} catch (e) {
+  // A bad SUNABA_HOOK_TIMEOUT_MS is a configuration error, like a bad flag.
+  console.error(e instanceof Error ? e.message : String(e));
+  process.exit(2);
+}
 
 console.log(
   `[sunaba-agentd] api listening on ${args.host}:${args.port}` +

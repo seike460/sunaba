@@ -99,6 +99,34 @@ describe("startHooksServer", () => {
     expect(onRun).not.toHaveBeenCalled();
   });
 
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5])(
+    "rejects maxBodyBytes %s with BadMaxBodyBytes before listening",
+    (maxBodyBytes) => {
+      expect(() => {
+        server = startHooksServer({}, { port: 0, host: "127.0.0.1", maxBodyBytes });
+      }).toThrow(expect.objectContaining({ code: "BadMaxBodyBytes" }));
+    },
+  );
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, 65_536])(
+    "rejects port %s when it starts (listen() validates it)",
+    (port) => {
+      expect(() => {
+        server = startHooksServer({}, { port, host: "127.0.0.1" });
+      }).toThrow(expect.objectContaining({ code: "ERR_SOCKET_BAD_PORT" }));
+    },
+  );
+
+  it("answers 413 to any non-empty body when maxBodyBytes is 0", async () => {
+    const onRun = vi.fn();
+    server = startHooksServer({ run: onRun }, { port: 0, host: "127.0.0.1", maxBodyBytes: 0 });
+    const port = await listening(server);
+    expect((await post(port, "/aws/lambda-microvms/runtime/v1/run", {})).status).toBe(413);
+    expect(onRun).not.toHaveBeenCalled();
+    expect((await post(port, "/aws/lambda-microvms/runtime/v1/run")).status).toBe(200);
+    expect(onRun).toHaveBeenCalledWith({});
+  });
+
   it("hands an empty body to the handler as {}", async () => {
     const onSuspend = vi.fn();
     server = startHooksServer({ suspend: onSuspend }, { port: 0, host: "127.0.0.1" });

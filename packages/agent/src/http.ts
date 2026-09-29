@@ -105,6 +105,7 @@ export interface JsonServerOptions {
   routes: Record<string, RouteHandler>;
   port: number;
   host?: string;
+  /** Max request body in bytes, a non-negative integer. Default 32 MiB. */
   maxBodyBytes?: number;
   onError?: (err: Error) => void;
 }
@@ -117,6 +118,12 @@ export interface JsonServerOptions {
  * under that prefix and passes the remainder to the handler.
  */
 export function startJsonServer(opts: JsonServerOptions): Server {
+  const maxBodyBytes = opts.maxBodyBytes ?? BODY_LIMIT;
+  // NaN or Infinity never trips `size > maxBytes`: bodies would buffer
+  // without limit. Throw like listen() does for a bad port.
+  if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 0) {
+    throw new RangeError(`maxBodyBytes must be a non-negative integer, got ${maxBodyBytes}`);
+  }
   const server = createServer(async (req, res) => {
     // A client aborting mid-flush (or closeAllConnections) emits 'error' on
     // the response after our write returns — an unhandled 'error' would be
@@ -155,7 +162,7 @@ export function startJsonServer(opts: JsonServerOptions): Server {
       let bodyTimer: NodeJS.Timeout | undefined;
       try {
         body = (await Promise.race([
-          readJsonBody(req, opts.maxBodyBytes ?? BODY_LIMIT),
+          readJsonBody(req, maxBodyBytes),
           new Promise<never>((_, reject) => {
             bodyTimer = setTimeout(() => {
               req.destroy();
