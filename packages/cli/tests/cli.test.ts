@@ -179,6 +179,16 @@ describe("parseArgs", () => {
     expect(() => flagInt(a, "timeout", { min: 0, max: 10 })).toThrow();
   });
 
+  it.each(["NaN", "Infinity", "-1", "1.5", "", " ", "1e3", "0x10", "1e999"])(
+    "flagInt rejects --timeout=%s",
+    (value) => {
+      const a = parseArgs([`--timeout=${value}`]);
+      expect(() => flagInt(a, "timeout", { min: 0, max: 99_999 })).toThrow(
+        "--timeout must be an integer in 0..99999",
+      );
+    },
+  );
+
   it("flagBool rejects a swallowed positional (--rm myname)", () => {
     const a = parseArgs(["--rm", "myname"]);
     expect(() => flagBool(a, "rm")).toThrow(/doesn't take a value/);

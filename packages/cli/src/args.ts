@@ -70,7 +70,8 @@ export function flagInt(
 ): number | undefined {
   const v = flagStr(args, name);
   if (v === undefined) return undefined;
-  const n = Number(v);
+  // Plain decimal digits only: Number("") is 0 and Number("0x10") is 16.
+  const n = /^-?\d+$/.test(v) ? Number(v) : Number.NaN;
   if (!Number.isInteger(n) || n < bounds.min || n > bounds.max) {
     throw new Error(`--${name} must be an integer in ${bounds.min}..${bounds.max}`);
   }
